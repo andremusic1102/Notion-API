@@ -33,7 +33,7 @@ Tickets:
   Priority: Medium
   Status: Review
   Type: Feature
-  Branch: chore/last-sync
+  Branch: chore/notion-sync
   Dev Notes: Add last-sync baseline tracking to ensure incremental syncs only append new commits and avoid duplicate Notion comments.
 - Title: CLI UX
   Ticket Number: 1005
