@@ -10,6 +10,7 @@ const NOTION_TOKEN = "ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47";
 const PROJECTS_DB_ID = 'f5124c3d-1b2c-47da-87af-9d062d01fde7';
 const TICKETS_DB_ID = '6574df08-bf7c-4813-906f-5f3f3f819908';
 const NOTION_VERSION = '2022-06-28';
+const NOTION_TIMEOUT_MS = 30000;
 
 function resolveSpecPath(specArg) {
   if (!specArg) {
@@ -260,8 +261,51 @@ function notionRequest(url, payload, method = 'POST') {
         });
       }
     );
+    req.setTimeout(NOTION_TIMEOUT_MS, () => {
+      req.destroy(new Error('Notion API request timed out'));
+    });
     req.on('error', (err) => reject(err));
     req.write(body);
+    req.end();
+  });
+}
+
+function notionGet(url) {
+  const parsedUrl = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${NOTION_TOKEN}`,
+          'Notion-Version': NOTION_VERSION,
+        },
+      },
+      (res) => {
+        let chunked = '';
+        res.on('data', (chunk) => {
+          chunked += chunk;
+        });
+        res.on('end', () => {
+          const success = res.statusCode && res.statusCode >= 200 && res.statusCode < 300;
+          if (success) {
+            try {
+              resolve(JSON.parse(chunked || '{}'));
+            } catch (err) {
+              reject(err);
+            }
+            return;
+          }
+          reject(new Error(`Notion API responded with ${res.statusCode}: ${chunked}`));
+        });
+      }
+    );
+    req.setTimeout(NOTION_TIMEOUT_MS, () => {
+      req.destroy(new Error('Notion API request timed out'));
+    });
+    req.on('error', (err) => reject(err));
     req.end();
   });
 }
@@ -799,7 +843,7 @@ function determineBranch(commit, fallbackBranch) {
   if (fromMessage) {
     return fromMessage;
   }
-  return fallbackBranch;
+  return fallbackBranch || null;
 }
 
 function shortHash(hash) {
@@ -879,6 +923,48 @@ function shouldAdvanceStatus(statusName, hasCommits) {
   return statusName === 'Backlog' && hasCommits;
 }
 
+function getCommentText(comment) {
+  if (!comment || !Array.isArray(comment.rich_text)) {
+    return '';
+  }
+  return comment.rich_text.map((item) => item.plain_text || '').join('');
+}
+
+async function fetchTicketComments(pageId) {
+  const comments = [];
+  let cursor = null;
+  while (true) {
+    const params = new URLSearchParams({ block_id: pageId, page_size: '100' });
+    if (cursor) {
+      params.set('start_cursor', cursor);
+    }
+    const result = await notionGet(`https://api.notion.com/v1/comments?${params.toString()}`);
+    if (Array.isArray(result.results)) {
+      comments.push(...result.results);
+    }
+    if (!result.has_more) {
+      break;
+    }
+    cursor = result.next_cursor;
+  }
+  return comments;
+}
+
+function collectCommentHashes(comments) {
+  const hashes = new Set();
+  for (const comment of comments) {
+    const text = getCommentText(comment);
+    if (!text) {
+      continue;
+    }
+    const matches = text.match(/\b[0-9a-f]{7,40}\b/gi) || [];
+    for (const match of matches) {
+      hashes.add(match.toLowerCase());
+    }
+  }
+  return hashes;
+}
+
 async function syncGitLog(sinceValue, options = {}) {
   let normalizedSince = normalizeSince(sinceValue);
   if (sinceValue === 'last-sync') {
@@ -892,12 +978,18 @@ async function syncGitLog(sinceValue, options = {}) {
     return { changes: 0 };
   }
   const ticketCache = {};
-  const fallbackBranch = currentBranchName();
-  const grouped = groupCommitsByBranch(commits, fallbackBranch);
+  const grouped = groupCommitsByBranch(commits);
   const nowIso = new Date().toISOString();
   let changes = 0;
   const repoRoot = resolveRepoRoot();
   const prefixes = allowedBranchPrefixes(repoRoot);
+  const specPath = resolveDefaultSpecPath(repoRoot);
+  if (!specPath || !fs.existsSync(specPath)) {
+    console.warn('No spec file found for mapping branches. Skipping sync.');
+    return { changes: 0 };
+  }
+  const specData = parseSpec(specPath);
+  const specBranches = new Set((specData.tickets || []).map((ticket) => ticket.Branch).filter(Boolean));
 
   for (const [branch, branchCommits] of grouped.entries()) {
     if (!branch) {
@@ -910,57 +1002,77 @@ async function syncGitLog(sinceValue, options = {}) {
       console.log(`Skipping branch ${branch} - unsupported prefix`);
       continue;
     }
-    const ticket = await findTicketForBranch(branch, ticketCache);
-    if (!ticket) {
-      console.log(`No ticket found for branch ${branch}`);
+    if (!specBranches.has(branch)) {
+      console.warn(`No matching ticket for branch ${branch}`);
       continue;
     }
-    const properties = ticket.properties || {};
-    const ticketNumber = getNumberValue(properties, 'Ticket Number');
-    const latestCommit = getRichTextValue(properties, 'Latest Commit');
-    const statusName = getSelectName(properties, 'Status');
-    const lastSynced = getDateValue(properties, 'Last Synced');
-
-    const forced = options.forceCommentTicketIds && options.forceCommentTicketIds.has(ticket.id);
-    const shouldSkipUntilFound =
-      !forced &&
-      latestCommit &&
-      branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
-    let startAppending = !shouldSkipUntilFound;
-    let appendedAny = false;
-    let newestCommit = null;
-
-    for (const commit of branchCommits) {
-      const commitShort = shortHash(commit.hash);
-      if (!startAppending) {
-        if (commitShort === latestCommit) {
-          startAppending = true;
-        }
+    try {
+      const ticket = await findTicketForBranch(branch, ticketCache);
+      if (!ticket) {
+        console.warn(`No matching ticket for branch ${branch}`);
         continue;
       }
-      await postCommitComment(ticket.id, commit);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
-      appendedAny = true;
-      newestCommit = commitShort;
-      changes += 1;
-    }
+      const properties = ticket.properties || {};
+      const ticketNumber = getNumberValue(properties, 'Ticket Number');
+      const latestCommit = getRichTextValue(properties, 'Latest Commit');
+      const statusName = getSelectName(properties, 'Status');
 
-    const propertyUpdates = {};
-    if (appendedAny && newestCommit && newestCommit !== latestCommit) {
-      propertyUpdates['Latest Commit'] = buildRichText(newestCommit);
-    }
-    if (appendedAny) {
-      propertyUpdates['Last Synced'] = buildDate(nowIso);
-    }
-    if (shouldAdvanceStatus(statusName, appendedAny)) {
-      propertyUpdates.Status = buildSelect('In Progress');
-    }
-    if (Object.keys(propertyUpdates).length > 0) {
-      await updatePageProperties(ticket.id, propertyUpdates);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Updated ticket ${ticketLabel}`);
-      changes += 1;
+      const forced = options.forceCommentTicketIds && options.forceCommentTicketIds.has(ticket.id);
+      const shouldSkipUntilFound =
+        !forced &&
+        latestCommit &&
+        branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
+      let startAppending = !shouldSkipUntilFound;
+      let appendedAny = false;
+      let newestCommit = null;
+
+      const existingComments = await fetchTicketComments(ticket.id);
+      const commentHashes = collectCommentHashes(existingComments);
+
+      for (const commit of branchCommits) {
+        const commitShort = shortHash(commit.hash);
+        const commitFull = commit.hash ? commit.hash.toLowerCase() : '';
+        if (!startAppending) {
+          if (commitShort === latestCommit) {
+            startAppending = true;
+          }
+          continue;
+        }
+        if (commentHashes.has(commitShort.toLowerCase()) || (commitFull && commentHashes.has(commitFull))) {
+          console.log(`Commit already synced to this ticket: ${commitShort}`);
+          continue;
+        }
+        await postCommitComment(ticket.id, commit);
+        const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
+        console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
+        appendedAny = true;
+        newestCommit = commitShort;
+        commentHashes.add(commitShort.toLowerCase());
+        if (commitFull) {
+          commentHashes.add(commitFull);
+        }
+        changes += 1;
+      }
+
+      const propertyUpdates = {};
+      if (appendedAny && newestCommit && newestCommit !== latestCommit) {
+        propertyUpdates['Latest Commit'] = buildRichText(newestCommit);
+      }
+      if (appendedAny) {
+        propertyUpdates['Last Synced'] = buildDate(nowIso);
+      }
+      if (shouldAdvanceStatus(statusName, appendedAny)) {
+        propertyUpdates.Status = buildSelect('In Progress');
+      }
+      if (Object.keys(propertyUpdates).length > 0) {
+        await updatePageProperties(ticket.id, propertyUpdates);
+        const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
+        console.log(`Updated ticket ${ticketLabel}`);
+        changes += 1;
+      }
+    } catch (error) {
+      console.warn(`Warning: ${error.message || error}`);
+      continue;
     }
   }
   if (changes === 0 && !options.suppressNoChanges) {
