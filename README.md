@@ -20,8 +20,15 @@ Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comme
 
 ## Initialize Notion-API
 
+Run init inside a project root. If `--spec` is omitted, it generates `docs/notion-init.md`.
+Use `--spec` for custom paths.
+
 ```bash
-node Notion-API/tools/notion-init.js init --spec Notion-API/specs/notion-init.md
+# Recommended
+node ../Notion-API/tools/notion-init.js init
+
+# Advanced
+node ../Notion-API/tools/notion-init.js init --spec path/to/notion-init.md
 ```
 
 ## Daily Sync

@@ -1,58 +1,37 @@
 Project:
-- Project Key: NOTION-REINIT
-- Project Name: Notion-API Reinit
+- Project Key: NOTIONAPI
+- Project Name: Notion-API
 - Repository: Notion-API
 - Default Branch: main
 - Status: Active
-- Description: Deterministic tooling to sync Git activity and Markdown specs into Notion Projects and Tickets for the Notion-API repo.
+- Description: Notion-API is a first-class project tracked in Notion.
 
 Tickets:
-- Title: Project-aware Init
+- Title: What is this?
   Ticket Number: 001
-  Priority: High
+  Priority: Medium
   Status: Backlog
   Type: Feature
-  Branch: chore/project-aware-init
-  Dev Notes: Initialize Notion-API with a project-aware spec flow and ensure repo root detection stays stable for future re-runs.
-- Title: Spec Generation
+  Branch: chore/what-is-this
+  Dev Notes: Notion-API is a first-class project tracked in Notion. It provides deterministic tooling to sync Git activity and Markdown specs into Notion Projects and Tickets. Notion-API 本身就是一個被 Notion 管理的 Project，負責把 Git 行為與 Markdown 規格穩定同步到 Notion。
+- Title: Workflow Alignment
   Ticket Number: 002
-  Priority: High
+  Priority: Medium
   Status: Backlog
   Type: Feature
-  Branch: chore/spec-generation
-  Dev Notes: Generate a clear markdown spec derived from README and folder layout for consistent Notion project setup.
-- Title: Sync Pipeline
+  Branch: chore/workflow-alignment
+  Dev Notes: Notion-API and Calories-Scanner follow the same workflow. Markdown spec is the only declarative source. Ticket Number is the immutable ID (Notion-API uses 1001+). Git commits become Notion ticket comments. diff / sync flows stay identical across projects. Notion-API 與 Calories-Scanner 採用完全一致的工作流：Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comment、diff / sync 一致。
+- Title: Initialize Notion-API
   Ticket Number: 003
-  Priority: High
+  Priority: Medium
   Status: Backlog
   Type: Feature
-  Branch: chore/sync-pipeline
-  Dev Notes: Keep sync behavior deterministic for project creation, ticket updates, and spec-driven field updates.
-- Title: Git Log Ingestion
+  Branch: chore/initialize-notion-api
+  Dev Notes: Run init inside a project root. If `--spec` is omitted, it generates `docs/notion-init.md`. Use `--spec` for custom paths. ```bash # Recommended node ../Notion-API/tools/notion-init.js init # Advanced node ../Notion-API/tools/notion-init.js init --spec path/to/notion-init.md ```
+- Title: Daily Sync
   Ticket Number: 004
   Priority: Medium
   Status: Backlog
   Type: Feature
-  Branch: chore/git-log-ingestion
-  Dev Notes: Map git commits to ticket branches and ensure comments are appended without duplication.
-- Title: Last Sync Baseline
-  Ticket Number: 005
-  Priority: Medium
-  Status: Backlog
-  Type: Feature
-  Branch: chore/last-sync-baseline
-  Dev Notes: Maintain last-sync state to support incremental sync runs and avoid repeated writes.
-- Title: Ticket Number Guard
-  Ticket Number: 006
-  Priority: Medium
-  Status: Backlog
-  Type: Tech Debt
-  Branch: techdebt/ticket-number-guard
-  Dev Notes: Enforce immutable ticket numbers across init and sync to prevent duplicates.
-- Title: Error Handling
-  Ticket Number: 007
-  Priority: Low
-  Status: Backlog
-  Type: Tech Debt
-  Branch: techdebt/error-handling
-  Dev Notes: Improve Notion API error reporting for predictable operator response.
+  Branch: chore/daily-sync
+  Dev Notes: ```bash node Notion-API/tools/notion-sync.js sync ```
