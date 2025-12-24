@@ -892,12 +892,24 @@ async function syncGitLog(sinceValue, options = {}) {
     return { changes: 0 };
   }
   const ticketCache = {};
-  const fallbackBranch = currentBranchName();
-  const grouped = groupCommitsByBranch(commits, fallbackBranch);
+  const grouped = groupCommitsByBranch(commits);
   const nowIso = new Date().toISOString();
   let changes = 0;
   const repoRoot = resolveRepoRoot();
   const prefixes = allowedBranchPrefixes(repoRoot);
+  const specPath = resolveDefaultSpecPath(repoRoot);
+  if (!specPath || !fs.existsSync(specPath)) {
+    console.warn('No spec file found for mapping branches. Skipping sync.');
+    return { changes: 0 };
+  }
+  const specData = parseSpec(specPath);
+  const specTickets = Array.isArray(specData.tickets) ? specData.tickets : [];
+  const specBranches = new Set(specTickets.map((ticket) => ticket.Branch).filter(Boolean));
+  const specByBranch = new Map(
+    specTickets
+      .filter((ticket) => ticket.Branch)
+      .map((ticket) => [ticket.Branch, ticket])
+  );
 
   for (const [branch, branchCommits] of grouped.entries()) {
     if (!branch) {
@@ -910,57 +922,81 @@ async function syncGitLog(sinceValue, options = {}) {
       console.log(`Skipping branch ${branch} - unsupported prefix`);
       continue;
     }
-    const ticket = await findTicketForBranch(branch, ticketCache);
-    if (!ticket) {
-      console.log(`No ticket found for branch ${branch}`);
+    if (!specBranches.has(branch)) {
+      console.warn(`No matching ticket for branch ${branch}`);
       continue;
     }
-    const properties = ticket.properties || {};
-    const ticketNumber = getNumberValue(properties, 'Ticket Number');
-    const latestCommit = getRichTextValue(properties, 'Latest Commit');
-    const statusName = getSelectName(properties, 'Status');
-    const lastSynced = getDateValue(properties, 'Last Synced');
-
-    const forced = options.forceCommentTicketIds && options.forceCommentTicketIds.has(ticket.id);
-    const shouldSkipUntilFound =
-      !forced &&
-      latestCommit &&
-      branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
-    let startAppending = !shouldSkipUntilFound;
-    let appendedAny = false;
-    let newestCommit = null;
-
-    for (const commit of branchCommits) {
-      const commitShort = shortHash(commit.hash);
-      if (!startAppending) {
-        if (commitShort === latestCommit) {
-          startAppending = true;
-        }
+    try {
+      const ticket = await findTicketForBranch(branch, ticketCache);
+      if (!ticket) {
+        console.warn(`No matching ticket for branch ${branch}`);
         continue;
       }
-      await postCommitComment(ticket.id, commit);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
-      appendedAny = true;
-      newestCommit = commitShort;
-      changes += 1;
-    }
+      const properties = ticket.properties || {};
+      const ticketNumber = getNumberValue(properties, 'Ticket Number');
+      const latestCommit = getRichTextValue(properties, 'Latest Commit');
+      const statusName = getSelectName(properties, 'Status');
 
-    const propertyUpdates = {};
-    if (appendedAny && newestCommit && newestCommit !== latestCommit) {
-      propertyUpdates['Latest Commit'] = buildRichText(newestCommit);
-    }
-    if (appendedAny) {
-      propertyUpdates['Last Synced'] = buildDate(nowIso);
-    }
-    if (shouldAdvanceStatus(statusName, appendedAny)) {
-      propertyUpdates.Status = buildSelect('In Progress');
-    }
-    if (Object.keys(propertyUpdates).length > 0) {
-      await updatePageProperties(ticket.id, propertyUpdates);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Updated ticket ${ticketLabel}`);
-      changes += 1;
+      const forced = options.forceCommentTicketIds && options.forceCommentTicketIds.has(ticket.id);
+      const shouldSkipUntilFound =
+        !forced &&
+        latestCommit &&
+        branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
+      let startAppending = !shouldSkipUntilFound;
+      let appendedAny = false;
+      let newestCommit = null;
+
+      const existingComments = await fetchTicketComments(ticket.id);
+      const commentHashes = collectCommentHashes(existingComments);
+
+      for (const commit of branchCommits) {
+        const commitShort = shortHash(commit.hash);
+        const commitFull = commit.hash ? commit.hash.toLowerCase() : '';
+        if (!startAppending) {
+          if (commitShort === latestCommit) {
+            startAppending = true;
+          }
+          continue;
+        }
+        if (commentHashes.has(commitShort.toLowerCase()) || (commitFull && commentHashes.has(commitFull))) {
+          console.log(`Commit already synced to this ticket: ${commitShort}`);
+          continue;
+        }
+        await postCommitComment(ticket.id, commit);
+        const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
+        console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
+        appendedAny = true;
+        newestCommit = commitShort;
+        commentHashes.add(commitShort.toLowerCase());
+        if (commitFull) {
+          commentHashes.add(commitFull);
+        }
+        changes += 1;
+      }
+
+      const propertyUpdates = {};
+      if (appendedAny && newestCommit && newestCommit !== latestCommit) {
+        propertyUpdates['Latest Commit'] = buildRichText(newestCommit);
+      }
+      if (appendedAny) {
+        propertyUpdates['Last Synced'] = buildDate(nowIso);
+      }
+      const specTicket = specByBranch.get(branch);
+      const desiredStatus = specTicket && specTicket.Status ? specTicket.Status : null;
+      if (desiredStatus && desiredStatus !== statusName) {
+        propertyUpdates.Status = buildSelect(desiredStatus);
+      } else if (shouldAdvanceStatus(statusName, appendedAny)) {
+        propertyUpdates.Status = buildSelect('In Progress');
+      }
+      if (Object.keys(propertyUpdates).length > 0) {
+        await updatePageProperties(ticket.id, propertyUpdates);
+        const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
+        console.log(`Updated ticket ${ticketLabel}`);
+        changes += 1;
+      }
+    } catch (error) {
+      console.warn(`Warning: ${error.message || error}`);
+      continue;
     }
   }
   if (changes === 0 && !options.suppressNoChanges) {
