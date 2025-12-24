@@ -90,31 +90,17 @@ function parseSpec(specPath) {
   return { project, tickets };
 }
 
-async function maybeFindProjectPageId(specData) {
-  const key = specData.project['Project Key'];
-  const name = specData.project['Project Name'];
-  const filters = [];
-  if (key) {
-    filters.push({
-      property: 'Project Key',
-      title: {
-        equals: key,
-      },
-    });
-  }
-  if (name) {
-    filters.push({
-      property: 'Project Name',
-      rich_text: {
-        equals: name,
-      },
-    });
-  }
-  if (filters.length === 0) {
+async function findProjectByKey(projectKey) {
+  if (!projectKey) {
     return null;
   }
   const payload = {
-    filter: filters.length === 1 ? filters[0] : { or: filters },
+    filter: {
+      property: 'Project Key',
+      title: {
+        equals: projectKey,
+      },
+    },
     page_size: 1,
   };
   const result = await queryDatabase(PROJECTS_DB_ID, payload);
@@ -349,10 +335,14 @@ async function main() {
   }
   const specPath = resolveSpecPath(options.spec);
   const specData = parseSpec(specPath);
-  const existingProjectId = await maybeFindProjectPageId(specData);
+  const existingProjectId = await findProjectByKey('NOTION');
   if (existingProjectId) {
-    console.log(`Project already exists (${existingProjectId}). Aborting.`);
-    return;
+    console.error(
+      "Project 'Notion-API' is already initialized.\n" +
+        'Initialization is a one-time operation.\n' +
+        "Use 'node Notion-API/tools/notion-sync.js sync' for daily updates."
+    );
+    process.exit(1);
   }
   const projectPageId = await createProject(specData);
   await createTickets(specData, projectPageId);

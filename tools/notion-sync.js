@@ -859,6 +859,46 @@ function currentBranchName() {
   }
 }
 
+function commitScopeFromBranch(branch) {
+  if (!branch) {
+    return 'unknown';
+  }
+  const parts = branch.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return branch;
+  }
+  return parts.slice(1).join('/');
+}
+
+function autoCommitIfNeeded() {
+  const branch = currentBranchName();
+  if (branch === 'main') {
+    console.error('Refusing to auto-commit on main branch. Switch to a work branch.');
+    process.exit(1);
+  }
+
+  const status = runGitCommand(['status', '--porcelain']);
+  if (!status.trim()) {
+    return { committed: false, failed: false };
+  }
+
+  runGitCommand(['add', '-u']);
+  const scope = commitScopeFromBranch(branch);
+  const message = `chore(${scope}): sync work session updates`;
+  try {
+    runGitCommand(['commit', '-m', message]);
+  } catch (error) {
+    console.error(error.message || error);
+    return { committed: false, failed: true };
+  }
+
+  const hash = runGitCommand(['rev-parse', '--short', 'HEAD']).trim();
+  if (hash) {
+    console.log(hash);
+  }
+  return { committed: true, failed: false, hash };
+}
+
 function groupCommitsByBranch(commits, fallbackBranch) {
   const grouped = new Map();
   const ordered = [...commits].reverse();
@@ -1150,6 +1190,10 @@ async function syncDaily() {
   const invalidSince = process.argv.includes('--since');
   if (invalidSince) {
     console.error("Invalid command. Use 'init' for new projects or 'sync' for daily updates.");
+    return;
+  }
+  const autoCommitResult = autoCommitIfNeeded();
+  if (autoCommitResult.failed) {
     return;
   }
   const result = await syncGitLog('last-sync', { suppressNoChanges: true });

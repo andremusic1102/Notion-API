@@ -24,8 +24,16 @@ Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comme
 node Notion-API/tools/notion-init.js init --spec Notion-API/specs/notion-init.md
 ```
 
+- The init command is a one-time operation.
+- Running it again after initialization will fail by design.
+- init 指令只能執行一次。
+- 若 Project 已存在，再次執行將直接失敗，這是刻意設計的防呆行為。
+
 ## Daily Sync
 
 ```bash
 node Notion-API/tools/notion-sync.js sync
 ```
+
+- The sync command will automatically create a commit for tracked file changes using a standardized commit message before syncing to Notion.
+- sync 指令會在同步前，自動為已追蹤的檔案建立一筆規格化的 commit，再將該次工作同步到 Notion。
