@@ -1112,7 +1112,7 @@ async function diffSync(specPath, options = {}) {
   const commits = parseGitLog('midnight');
   const fallbackBranch = currentBranchName();
   const groupedCommits = groupCommitsByBranch(commits, fallbackBranch);
-  const today = new Date().toISOString().slice(0, 10);
+  const nowIso = new Date().toISOString();
   let changes = 0;
   const forceCommentTicketIds = new Set();
   const seenNumbers = new Set();
@@ -1138,7 +1138,7 @@ async function diffSync(specPath, options = {}) {
 
     if (!existing) {
       const payload = buildTicketPayloadFromSpec(ticketSpec, projectPageId);
-      payload.properties['Last Synced'] = buildDate(today);
+      payload.properties['Last Synced'] = buildDate(nowIso);
       if (latestCommit) {
         payload.properties['Latest Commit'] = buildRichText(latestCommit);
       }
@@ -1188,8 +1188,8 @@ async function diffSync(specPath, options = {}) {
       updates.Status = buildSelect(ticketSpec.Status);
       updatedFields.push('Status');
     }
-    if (lastSynced !== today) {
-      updates['Last Synced'] = buildDate(today);
+    if (lastSynced !== nowIso) {
+      updates['Last Synced'] = buildDate(nowIso);
       updatedFields.push('Last Synced');
     }
     const existingLatestCommit = getRichTextValue(existing.properties, 'Latest Commit');
@@ -1245,7 +1245,7 @@ async function initProject(specPath) {
   }
 
   let changes = 0;
-  const today = new Date().toISOString().slice(0, 10);
+  const nowIso = new Date().toISOString();
   for (const ticketSpec of specData.tickets) {
     const rawNumber = ticketSpec['Ticket Number'];
     const number = Number(rawNumber);
@@ -1258,7 +1258,7 @@ async function initProject(specPath) {
       continue;
     }
     const payload = buildTicketPayloadFromSpec(ticketSpec, projectPageId);
-    payload.properties['Last Synced'] = buildDate(today);
+    payload.properties['Last Synced'] = buildDate(nowIso);
     const created = await notionPost(payload);
     console.log(`Created ticket ${number} (${created.id})`);
     changes += 1;
