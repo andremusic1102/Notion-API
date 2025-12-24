@@ -10,20 +10,20 @@ Tickets:
 - Title: Verify project creation payload
   Ticket Number: 1001
   Priority: High 🔥
-  Status: In Progress
+  Status: Review
   Type: Feature
   Branch: feature/verify-project
 
 - Title: Verify ticket creation payload
   Ticket Number: 1002
   Priority: Medium
-  Status: Backlog
+  Status: Review
   Type: Feature
   Branch: feature/verify-ticket
 
 - Title: Verify relation and status mapping
   Ticket Number: 1003
   Priority: Low
-  Status: Backlog
+  Status: Review
   Type: Tech Debt
   Branch: chore/verify-relation
