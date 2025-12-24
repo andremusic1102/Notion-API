@@ -989,7 +989,13 @@ async function syncGitLog(sinceValue, options = {}) {
     return { changes: 0 };
   }
   const specData = parseSpec(specPath);
-  const specBranches = new Set((specData.tickets || []).map((ticket) => ticket.Branch).filter(Boolean));
+  const specTickets = Array.isArray(specData.tickets) ? specData.tickets : [];
+  const specBranches = new Set(specTickets.map((ticket) => ticket.Branch).filter(Boolean));
+  const specByBranch = new Map(
+    specTickets
+      .filter((ticket) => ticket.Branch)
+      .map((ticket) => [ticket.Branch, ticket])
+  );
 
   for (const [branch, branchCommits] of grouped.entries()) {
     if (!branch) {
@@ -1061,7 +1067,11 @@ async function syncGitLog(sinceValue, options = {}) {
       if (appendedAny) {
         propertyUpdates['Last Synced'] = buildDate(nowIso);
       }
-      if (shouldAdvanceStatus(statusName, appendedAny)) {
+      const specTicket = specByBranch.get(branch);
+      const desiredStatus = specTicket && specTicket.Status ? specTicket.Status : null;
+      if (desiredStatus && desiredStatus !== statusName) {
+        propertyUpdates.Status = buildSelect(desiredStatus);
+      } else if (shouldAdvanceStatus(statusName, appendedAny)) {
         propertyUpdates.Status = buildSelect('In Progress');
       }
       if (Object.keys(propertyUpdates).length > 0) {
