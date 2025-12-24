@@ -1062,8 +1062,8 @@ async function diffSync(specPath, options = {}) {
       updates.Type = buildSelect(ticketSpec.Type);
       updatedFields.push('Type');
     }
-    if (shouldAdvanceStatus(statusName, hasCommits) && ticketSpec.Status === 'Backlog') {
-      updates.Status = buildSelect('In Progress');
+    if (ticketSpec.Status && ticketSpec.Status !== statusName) {
+      updates.Status = buildSelect(ticketSpec.Status);
       updatedFields.push('Status');
     }
     if (lastSynced !== today) {
