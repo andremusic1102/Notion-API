@@ -18,6 +18,22 @@ function resolveSpecPath(specArg) {
   return path.isAbsolute(specArg) ? specArg : path.resolve(process.cwd(), specArg);
 }
 
+function resolveDefaultSpecPath(repoRoot) {
+  if (!repoRoot) {
+    return null;
+  }
+  const candidates = [
+    path.join(repoRoot, 'specs', 'notion-init.md'),
+    path.join(repoRoot, 'docs', 'notion-init.md'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 function splitKeyValue(line) {
   const colonIndex = line.indexOf(':');
   if (colonIndex === -1) {
@@ -260,10 +276,6 @@ function notionPatch(url, payload) {
 
 function notionComment(payload) {
   return notionRequest('https://api.notion.com/v1/comments', payload, 'POST');
-}
-
-function notionPatch(url, payload) {
-  return notionRequest(url, payload, 'PATCH');
 }
 
 function consolidateProperties(source) {
@@ -509,12 +521,44 @@ async function updatePageProperties(pageId, properties) {
   return notionPatch(`https://api.notion.com/v1/pages/${pageId}`, { properties });
 }
 
+let cachedRepoRoot = null;
+
 function resolveRepoRoot() {
-  try {
-    return runGitCommand(['rev-parse', '--show-toplevel']).trim();
-  } catch (error) {
-    return null;
+  if (cachedRepoRoot !== null) {
+    return cachedRepoRoot;
   }
+  const candidates = [process.cwd(), path.resolve(__dirname, '..')];
+  for (const candidate of candidates) {
+    const result = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      cwd: candidate,
+    });
+    if (result.status === 0) {
+      cachedRepoRoot = result.stdout.trim();
+      return cachedRepoRoot;
+    }
+  }
+  cachedRepoRoot = null;
+  return null;
+}
+
+function repoNameFromRoot(repoRoot) {
+  return repoRoot ? path.basename(repoRoot) : null;
+}
+
+function allowedBranchPrefixes(repoRoot) {
+  const repoName = repoNameFromRoot(repoRoot);
+  if (repoName === 'Notion-API') {
+    return ['chore/', 'techdebt/'];
+  }
+  return ['feature/', 'techdebt/', 'chore/'];
+}
+
+function isAllowedBranch(branch, prefixes) {
+  if (!branch) {
+    return false;
+  }
+  return prefixes.some((prefix) => branch.startsWith(prefix));
 }
 
 async function appendTicketsToSpec(specPath, tickets) {
@@ -547,9 +591,9 @@ async function updateSpecFromGit() {
   if (!repoRoot) {
     throw new Error('Unable to resolve git repo root');
   }
-  const specPath = path.join(repoRoot, 'docs', 'notion-init.md');
-  if (!fs.existsSync(specPath)) {
-    throw new Error(`Spec file not found: ${specPath}`);
+  const specPath = resolveDefaultSpecPath(repoRoot);
+  if (!specPath || !fs.existsSync(specPath)) {
+    throw new Error(`Spec file not found: ${specPath || 'unknown'}`);
   }
   const specData = parseSpec(specPath);
   const existingBranches = new Set(
@@ -579,12 +623,13 @@ async function updateSpecFromGit() {
   const projectName = specData.project['Project Name'];
   const projectDescription = specData.project.Description;
 
+  const prefixes = allowedBranchPrefixes(repoRoot);
   const sortedBranches = Array.from(candidateBranches).sort();
   for (const branch of sortedBranches) {
     if (!branch || existingBranches.has(branch)) {
       continue;
     }
-    if (!branch.startsWith('feature/') && !branch.startsWith('techdebt/')) {
+    if (!isAllowedBranch(branch, prefixes)) {
       continue;
     }
     const branchCommits = groupedCommits.get(branch) || [];
@@ -612,8 +657,9 @@ async function updateSpecFromGit() {
   return { appendedCount, specPath, groupedCommits };
 }
 
-function runGitCommand(args) {
-  const result = spawnSync('git', args, { encoding: 'utf8' });
+function runGitCommand(args, options = {}) {
+  const repoRoot = options.cwd || resolveRepoRoot();
+  const result = spawnSync('git', args, { encoding: 'utf8', cwd: repoRoot || process.cwd() });
   if (result.error) {
     throw result.error;
   }
@@ -636,8 +682,8 @@ async function getLastSyncBaseline() {
     console.log('No Last Synced found, falling back to today');
     return 'midnight';
   }
-  const specPath = path.join(repoRoot, 'docs', 'notion-init.md');
-  if (!fs.existsSync(specPath)) {
+  const specPath = resolveDefaultSpecPath(repoRoot);
+  if (!specPath || !fs.existsSync(specPath)) {
     console.log('No Last Synced found, falling back to today');
     return 'midnight';
   }
@@ -850,12 +896,18 @@ async function syncGitLog(sinceValue, options = {}) {
   const grouped = groupCommitsByBranch(commits, fallbackBranch);
   const nowIso = new Date().toISOString();
   let changes = 0;
+  const repoRoot = resolveRepoRoot();
+  const prefixes = allowedBranchPrefixes(repoRoot);
 
   for (const [branch, branchCommits] of grouped.entries()) {
     if (!branch) {
       for (const commit of branchCommits) {
         console.log(`Skipping commit ${commit.hash} - branch could not be determined`);
       }
+      continue;
+    }
+    if (!isAllowedBranch(branch, prefixes)) {
+      console.log(`Skipping branch ${branch} - unsupported prefix`);
       continue;
     }
     const ticket = await findTicketForBranch(branch, ticketCache);
@@ -1123,7 +1175,7 @@ function parseArgs(argv) {
 
 function showUsage() {
   console.error(
-    "Usage: node notion-sync.js <init|sync> --spec <path>"
+    "Usage: node notion-sync.js init --spec <path> | node notion-sync.js sync"
   );
 }
 

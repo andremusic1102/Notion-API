@@ -90,6 +90,37 @@ function parseSpec(specPath) {
   return { project, tickets };
 }
 
+async function maybeFindProjectPageId(specData) {
+  const key = specData.project['Project Key'];
+  const name = specData.project['Project Name'];
+  const filters = [];
+  if (key) {
+    filters.push({
+      property: 'Project Key',
+      title: {
+        equals: key,
+      },
+    });
+  }
+  if (name) {
+    filters.push({
+      property: 'Project Name',
+      rich_text: {
+        equals: name,
+      },
+    });
+  }
+  if (filters.length === 0) {
+    return null;
+  }
+  const payload = {
+    filter: filters.length === 1 ? filters[0] : { or: filters },
+    page_size: 1,
+  };
+  const result = await queryDatabase(PROJECTS_DB_ID, payload);
+  return result.results && result.results.length > 0 ? result.results[0].id : null;
+}
+
 function buildTitle(value) {
   if (!value) {
     return null;
@@ -161,16 +192,18 @@ function addProperty(target, name, builder, sourceKey) {
   }
 }
 
-function notionPost(payload) {
+function notionRequest(url, payload, method = 'POST') {
   if (!NOTION_TOKEN) {
     return Promise.reject(new Error('NOTION_TOKEN must be set'));
   }
   const body = JSON.stringify(payload);
+  const parsedUrl = new URL(url);
   return new Promise((resolve, reject) => {
     const req = https.request(
-      NOTION_API_URL,
       {
-        method: 'POST',
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method,
         headers: {
           Authorization: `Bearer ${NOTION_TOKEN}`,
           'Notion-Version': NOTION_VERSION,
@@ -203,6 +236,14 @@ function notionPost(payload) {
   });
 }
 
+function notionPost(payload) {
+  return notionRequest(NOTION_API_URL, payload, 'POST');
+}
+
+function queryDatabase(databaseId, payload) {
+  return notionRequest(`https://api.notion.com/v1/databases/${databaseId}/query`, payload, 'POST');
+}
+
 async function createProject(specData) {
   if (!specData.project['Project Name']) {
     throw new Error('Project Name is required in the spec');
@@ -223,7 +264,7 @@ async function createProject(specData) {
   };
 
   const created = await notionPost(payload);
-  console.log('PROJECT_PAGE_ID', created.id);
+  console.log(`Project created: ${created.id}`);
   return created.id;
 }
 
@@ -235,7 +276,20 @@ async function createTickets(specData, projectPageId) {
     throw new Error('Project page id is required to create tickets');
   }
 
+  const seenNumbers = new Set();
   for (const ticket of specData.tickets) {
+    const rawNumber = ticket['Ticket Number'];
+    const number = Number(rawNumber);
+    if (Number.isNaN(number)) {
+      console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
+      continue;
+    }
+    if (seenNumbers.has(number)) {
+      console.log(`Skipping duplicate Ticket Number in spec: ${number}`);
+      continue;
+    }
+    seenNumbers.add(number);
+
     const props = consolidateProperties(ticket);
     addProperty(props, 'Title', buildTitle, 'Title');
     addProperty(props, 'Ticket Number', buildNumber, 'Ticket Number');
@@ -259,7 +313,7 @@ async function createTickets(specData, projectPageId) {
     };
 
     const created = await notionPost(payload);
-    console.log('TICKET_PAGE_ID', created.id);
+    console.log(`Ticket ${number} created: ${created.id}`);
   }
 }
 
@@ -279,17 +333,27 @@ function parseArgs(argv) {
 }
 
 function showUsage() {
-  console.error('Usage: node notion-init.js --spec <path-to-spec>');
+  console.error('Usage: node notion-init.js init --spec <path-to-spec>');
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const [, , command, ...rest] = process.argv;
+  if (command !== 'init') {
+    showUsage();
+    return;
+  }
+  const options = parseArgs(rest);
   if (!options.spec) {
     showUsage();
     return;
   }
   const specPath = resolveSpecPath(options.spec);
   const specData = parseSpec(specPath);
+  const existingProjectId = await maybeFindProjectPageId(specData);
+  if (existingProjectId) {
+    console.log(`Project already exists (${existingProjectId}). Aborting.`);
+    return;
+  }
   const projectPageId = await createProject(specData);
   await createTickets(specData, projectPageId);
 }

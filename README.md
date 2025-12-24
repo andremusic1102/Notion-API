@@ -1,48 +1,31 @@
-# Notion Project & Ticket Sync Tool
+# Notion-API
 
 ## What is this?
 
-This is an internal Notion synchronization tool for engineers.
-It treats Git branches and commits as the source of truth and keeps
-Notion Projects and Tickets in sync automatically.
-這是一個工程師自用的 Notion 同步工具。
-Git（branch 與 commit）是唯一的事實來源，
-Notion 僅作為專案與任務的視覺化與協作層。
+Notion-API is a first-class project tracked in Notion.
+It provides deterministic tooling to sync Git activity and Markdown specs into Notion Projects and Tickets.
+Notion-API 本身就是一個被 Notion 管理的 Project，
+負責把 Git 行為與 Markdown 規格穩定同步到 Notion。
 
-## Architecture Overview
+## Workflow Alignment
 
-- <PROJECT_NAME>: the actual product repository (Git repo)
-- notionapi: automation tools (not a Git repository)
-- Markdown spec (notion-init.md): the only human-edited source
-- Notion: visualization of projects and tickets
+- Notion-API and Calories-Scanner follow the same workflow
+- Markdown spec is the only declarative source
+- Ticket Number is the immutable ID (Notion-API uses 1001+)
+- Git commits become Notion ticket comments
+- diff / sync flows stay identical across projects
 
-Data flow:
+Notion-API 與 Calories-Scanner 採用完全一致的工作流：
+Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comment、diff / sync 一致。
 
-Git → Markdown Spec → Notion
-
-- <PROJECT_NAME>：實際的產品專案（Git repo）
-- notionapi：自動化工具（不是 Git repo）
-- Markdown（notion-init.md）：唯一由人維護的規格
-- Notion：專案與任務的顯示層
-
-資料流方向：
-
-Git → Markdown 規格 → Notion
-
-## Initialize a New Project
-
-Use init once for a new project:
-init 只在新專案第一次使用：
+## Initialize Notion-API
 
 ```bash
-node ../notionapi/tools/notion-sync.js init --spec <PROJECT_NAME>/docs/notion-init.md
+node Notion-API/tools/notion-init.js init --spec Notion-API/specs/notion-init.md
 ```
 
 ## Daily Sync
 
-Use sync at the end of each work session:
-sync 可每天或每個工作階段結束後執行：
-
 ```bash
-node ../notionapi/tools/notion-sync.js sync
+node Notion-API/tools/notion-sync.js sync
 ```
