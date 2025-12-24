@@ -2,12 +2,14 @@
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const PROJECTS_DB_ID = 'f5124c3d-1b2c-47da-87af-9d062d01fde7';
 const TICKETS_DB_ID = '6574df08-bf7c-4813-906f-5f3f3f819908';
 const NOTION_VERSION = '2022-06-28';
 const NOTION_API_URL = 'https://api.notion.com/v1/pages';
 const NOTION_TOKEN = 'ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47';
+const NOTION_TIMEOUT_MS = 30000;
 
 function resolveSpecPath(specArg) {
   if (!specArg) {
@@ -230,6 +232,9 @@ function notionRequest(url, payload, method = 'POST') {
         });
       }
     );
+    req.setTimeout(NOTION_TIMEOUT_MS, () => {
+      req.destroy(new Error('Notion API request timed out'));
+    });
     req.on('error', (err) => reject(err));
     req.write(body);
     req.end();
@@ -264,7 +269,6 @@ async function createProject(specData) {
   };
 
   const created = await notionPost(payload);
-  console.log(`Project created: ${created.id}`);
   return created.id;
 }
 
@@ -276,19 +280,13 @@ async function createTickets(specData, projectPageId) {
     throw new Error('Project page id is required to create tickets');
   }
 
-  const seenNumbers = new Set();
+  const createdNumbers = [];
   for (const ticket of specData.tickets) {
     const rawNumber = ticket['Ticket Number'];
     const number = Number(rawNumber);
     if (Number.isNaN(number)) {
-      console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
-      continue;
+      throw new Error(`Invalid Ticket Number in spec: ${rawNumber}`);
     }
-    if (seenNumbers.has(number)) {
-      console.log(`Skipping duplicate Ticket Number in spec: ${number}`);
-      continue;
-    }
-    seenNumbers.add(number);
 
     const props = consolidateProperties(ticket);
     addProperty(props, 'Title', buildTitle, 'Title');
@@ -312,14 +310,16 @@ async function createTickets(specData, projectPageId) {
       properties: props.data,
     };
 
-    const created = await notionPost(payload);
-    console.log(`Ticket ${number} created: ${created.id}`);
+    await notionPost(payload);
+    createdNumbers.push(String(number).padStart(3, '0'));
   }
+  return createdNumbers;
 }
 
 function parseArgs(argv) {
   const args = {
     spec: null,
+    unknown: [],
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -328,12 +328,444 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
+    if (token.startsWith('-')) {
+      args.unknown.push(token);
+      continue;
+    }
   }
   return args;
 }
 
 function showUsage() {
-  console.error('Usage: node notion-init.js init --spec <path-to-spec>');
+  console.error('Usage: node notion-init.js init [--spec <path-to-spec>]');
+}
+
+let cachedRepoRoot = null;
+
+function resolveRepoRoot() {
+  if (cachedRepoRoot !== null) {
+    return cachedRepoRoot;
+  }
+  const candidates = [process.cwd(), path.resolve(__dirname, '..')];
+  for (const candidate of candidates) {
+    try {
+      const result = execSync('git rev-parse --show-toplevel', {
+        encoding: 'utf8',
+        cwd: candidate,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+      if (result) {
+        cachedRepoRoot = result;
+        return cachedRepoRoot;
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+  cachedRepoRoot = null;
+  return null;
+}
+
+function assertGitRepo(repoRoot) {
+  try {
+    const inside = execSync('git rev-parse --is-inside-work-tree', { encoding: 'utf8', cwd: repoRoot }).trim();
+    if (inside !== 'true') {
+      throw new Error('Not inside a git repository. Aborting.');
+    }
+  } catch (error) {
+    throw new Error('Not inside a git repository. Aborting.');
+  }
+
+  try {
+    execSync('git symbolic-ref -q HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: repoRoot });
+  } catch (error) {
+    throw new Error('Detached HEAD state detected. Aborting.');
+  }
+
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8', cwd: repoRoot }).trim();
+    if (branch === 'main') {
+      throw new Error('Init cannot run on main branch. Aborting.');
+    }
+  } catch (error) {
+    if (error.message && error.message.includes('Init cannot run on main branch')) {
+      throw error;
+    }
+    throw new Error('Failed to determine current branch. Aborting.');
+  }
+}
+
+function runGit(command, failureMessage, cwd) {
+  try {
+    return execSync(command, { encoding: 'utf8', cwd }).trim();
+  } catch (error) {
+    const stderr = error.stderr ? String(error.stderr).trim() : '';
+    const suffix = stderr ? `: ${stderr}` : '';
+    throw new Error(`${failureMessage}${suffix}`);
+  }
+}
+
+function readRemoteBranches(repoRoot) {
+  try {
+    const output = runGit('git ls-remote --heads origin', 'Failed to list remote branches', repoRoot);
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    const branches = new Set();
+    for (const line of lines) {
+      const parts = line.split(/\s+/);
+      const ref = parts[1] || '';
+      const match = ref.match(/^refs\/heads\/(.+)$/);
+      if (match) {
+        branches.add(match[1]);
+      }
+    }
+    return { branches, available: true };
+  } catch (error) {
+    console.warn('Warning: Unable to access origin. Skipping remote branch checks.');
+    return { branches: new Set(), available: false };
+  }
+}
+
+function ensureGitBranches(specData, repoRoot) {
+  assertGitRepo(repoRoot);
+
+  const ignore = new Set(['main', 'master', 'HEAD']);
+  const detected = [];
+  const skipped = new Set();
+  const seen = new Set();
+
+  for (const ticket of specData.tickets || []) {
+    const branch = (ticket.Branch || '').trim();
+    if (!branch || ignore.has(branch)) {
+      skipped.add(branch || '<empty>');
+      continue;
+    }
+    if (seen.has(branch)) {
+      continue;
+    }
+    seen.add(branch);
+    detected.push(branch);
+  }
+
+  console.log(`Branches defined in spec: ${detected.length > 0 ? detected.join(', ') : '(none)'}`);
+  for (const branch of skipped) {
+    console.log(`Skipped branch: ${branch}`);
+  }
+
+  if (detected.length === 0) {
+    return;
+  }
+
+  const existing = new Set(
+    runGit(
+      'git for-each-ref --format="%(refname:short)" refs/heads',
+      'Failed to list git branches',
+      repoRoot
+    )
+      .split(/\r?\n/)
+      .filter(Boolean)
+  );
+
+  const remoteInfo = readRemoteBranches(repoRoot);
+  const remoteBranches = remoteInfo.branches;
+  if (remoteInfo.available) {
+    console.log(
+      `Remote branches existing: ${remoteBranches.size > 0 ? Array.from(remoteBranches).join(', ') : '(none)'}`
+    );
+  }
+
+  const createdLocal = [];
+  const pushedRemote = [];
+  const alreadyRemote = [];
+  const localOnly = [];
+
+  for (const branch of detected) {
+    if (existing.has(branch)) {
+      console.log(`Branch already exists: ${branch}`);
+    } else {
+      runGit(`git branch ${branch}`, `Failed to create git branch ${branch}`, repoRoot);
+      existing.add(branch);
+      createdLocal.push(branch);
+      console.log(`Created git branch: ${branch}`);
+    }
+
+    if (!remoteInfo.available) {
+      localOnly.push(branch);
+      continue;
+    }
+
+    if (remoteBranches.has(branch)) {
+      alreadyRemote.push(branch);
+      console.log(`Branch already exists on remote: ${branch}`);
+      continue;
+    }
+
+    try {
+      runGit(`git push -u origin ${branch}`, `Failed to push git branch ${branch}`, repoRoot);
+      pushedRemote.push(branch);
+      remoteBranches.add(branch);
+      console.log(`Pushed git branch to remote: ${branch}`);
+    } catch (error) {
+      console.warn(`Warning: ${error.message || error}`);
+      localOnly.push(branch);
+    }
+  }
+
+  if (createdLocal.length > 0) {
+    console.log(`Local branches created: ${createdLocal.join(', ')}`);
+  } else {
+    console.log('Local branches created: (none)');
+  }
+
+  if (remoteInfo.available) {
+    if (pushedRemote.length > 0) {
+      console.log(`Branches pushed to remote: ${pushedRemote.join(', ')}`);
+    } else {
+      console.log('Branches pushed to remote: (none)');
+    }
+
+    if (alreadyRemote.length > 0) {
+      console.log(`Branches already existing on remote: ${alreadyRemote.join(', ')}`);
+    } else {
+      console.log('Branches already existing on remote: (none)');
+    }
+
+    if (localOnly.length > 0) {
+      console.log(`Local-only branches: ${localOnly.join(', ')}`);
+    } else {
+      console.log('Local-only branches: (none)');
+    }
+  } else if (localOnly.length > 0) {
+    console.log(`Local-only branches: ${localOnly.join(', ')}`);
+  }
+}
+
+function slugify(input) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function limitWords(text, maxWords) {
+  const words = text.split(/\s+/).filter(Boolean);
+  return words.slice(0, maxWords).join(' ');
+}
+
+function deriveProjectInfo(projectRoot) {
+  const name = path.basename(projectRoot);
+  const key = name.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'PROJECT';
+  return {
+    'Project Key': key,
+    'Project Name': name,
+    Repository: name,
+    'Default Branch': 'main',
+    Status: 'Active',
+  };
+}
+
+function extractReadmeSections(projectRoot) {
+  const readmePath = path.join(projectRoot, 'README.md');
+  if (!fs.existsSync(readmePath)) {
+    return [];
+  }
+  const raw = fs.readFileSync(readmePath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  const sections = [];
+  let current = null;
+
+  for (const line of lines) {
+    const match = line.match(/^##\s+(.*)$/);
+    if (match) {
+      if (current) {
+        sections.push(current);
+      }
+      current = { title: match[1].trim(), body: [] };
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    current.body.push(line);
+  }
+  if (current) {
+    sections.push(current);
+  }
+  return sections.map((section) => ({
+    title: section.title,
+    content: section.body.join('\n').trim(),
+  }));
+}
+
+function extractReadmeSummary(projectRoot) {
+  const readmePath = path.join(projectRoot, 'README.md');
+  if (!fs.existsSync(readmePath)) {
+    return '';
+  }
+  const raw = fs.readFileSync(readmePath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith('#')) {
+      continue;
+    }
+    return trimmed;
+  }
+  return '';
+}
+
+function listFallbackFolders(projectRoot) {
+  const excluded = new Set([
+    '.git',
+    'docs',
+    'specs',
+    'tools',
+    'node_modules',
+    'dist',
+    'build',
+    'coverage',
+    'vendor',
+  ]);
+  return fs
+    .readdirSync(projectRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => !name.startsWith('.') && !excluded.has(name));
+}
+
+function normalizeTicketTitle(rawTitle) {
+  const title = rawTitle.trim() || 'Untitled';
+  return limitWords(title, 3);
+}
+
+function buildTicketBranch(base, usedBranches, fallbackSuffix) {
+  const slug = slugify(base) || `ticket-${fallbackSuffix}`;
+  let candidate = `chore/${slug}`;
+  let counter = 1;
+  while (usedBranches.has(candidate)) {
+    candidate = `chore/${slug}-${counter}`;
+    counter += 1;
+  }
+  usedBranches.add(candidate);
+  return candidate;
+}
+
+function buildTicketsFromSections(sections) {
+  const usedBranches = new Set();
+  return sections.map((section, index) => {
+    const title = normalizeTicketTitle(section.title);
+    const devNotes = (section.content || section.title).replace(/\s+/g, ' ').trim();
+    const branch = buildTicketBranch(section.title, usedBranches, index + 1);
+    return {
+      Title: title,
+      'Ticket Number': String(index + 1).padStart(3, '0'),
+      Priority: 'Medium',
+      Status: 'Backlog',
+      Type: 'Feature',
+      Branch: branch,
+      'Dev Notes': devNotes,
+    };
+  });
+}
+
+function buildTicketsFromFolders(folders) {
+  const usedBranches = new Set();
+  return folders.map((folder, index) => {
+    const title = normalizeTicketTitle(folder.replace(/[-_]+/g, ' '));
+    const branch = buildTicketBranch(folder, usedBranches, index + 1);
+    return {
+      Title: title,
+      'Ticket Number': String(index + 1).padStart(3, '0'),
+      Priority: 'Medium',
+      Status: 'Backlog',
+      Type: 'Feature',
+      Branch: branch,
+      'Dev Notes': `Folder: ${folder}`,
+    };
+  });
+}
+
+function buildSpecData(projectRoot) {
+  const project = deriveProjectInfo(projectRoot);
+  const summary = extractReadmeSummary(projectRoot);
+  if (summary) {
+    project.Description = summary;
+  }
+  const sections = extractReadmeSections(projectRoot);
+  let tickets =
+    sections.length > 0 ? buildTicketsFromSections(sections) : buildTicketsFromFolders(listFallbackFolders(projectRoot));
+  if (tickets.length === 0) {
+    tickets = [
+      {
+        Title: 'Project Setup',
+        'Ticket Number': '001',
+        Priority: 'Medium',
+        Status: 'Backlog',
+        Type: 'Feature',
+        Branch: 'chore/project-setup',
+        'Dev Notes': 'Bootstrap initial project structure and documentation.',
+      },
+    ];
+  }
+  return { project, tickets };
+}
+
+function validateSpecTickets(specData) {
+  if (!Array.isArray(specData.tickets) || specData.tickets.length === 0) {
+    throw new Error('No tickets defined in the spec');
+  }
+  const seenNumbers = new Set();
+  for (const ticket of specData.tickets) {
+    const rawNumber = ticket['Ticket Number'];
+    const number = Number(rawNumber);
+    if (Number.isNaN(number)) {
+      throw new Error(`Invalid Ticket Number in spec: ${rawNumber}`);
+    }
+    if (seenNumbers.has(number)) {
+      throw new Error(`Duplicate Ticket Number in spec: ${number}`);
+    }
+    seenNumbers.add(number);
+  }
+}
+
+function serializeSpec(specData) {
+  const lines = ['Project:'];
+  const projectKeys = [
+    'Project Key',
+    'Project Name',
+    'Repository',
+    'Default Branch',
+    'Status',
+    'Description',
+  ];
+  for (const key of projectKeys) {
+    if (specData.project[key]) {
+      lines.push(`- ${key}: ${specData.project[key]}`);
+    }
+  }
+  lines.push('', 'Tickets:');
+  for (const ticket of specData.tickets) {
+    lines.push(`- Title: ${ticket.Title}`);
+    lines.push(`  Ticket Number: ${ticket['Ticket Number']}`);
+    lines.push(`  Priority: ${ticket.Priority}`);
+    lines.push(`  Status: ${ticket.Status}`);
+    lines.push(`  Type: ${ticket.Type}`);
+    lines.push(`  Branch: ${ticket.Branch}`);
+    lines.push(`  Dev Notes: ${ticket['Dev Notes']}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function writeSpecFile(specPath, specData) {
+  fs.mkdirSync(path.dirname(specPath), { recursive: true });
+  fs.writeFileSync(specPath, serializeSpec(specData), 'utf8');
+  console.log(`Spec generated at ${specPath}`);
+}
+
+function resolveDefaultSpecPath(projectRoot) {
+  return path.join(projectRoot, 'specs', 'notion-init.md');
 }
 
 async function main() {
@@ -343,22 +775,53 @@ async function main() {
     return;
   }
   const options = parseArgs(rest);
-  if (!options.spec) {
+  if (options.unknown.length > 0) {
     showUsage();
     return;
   }
-  const specPath = resolveSpecPath(options.spec);
-  const specData = parseSpec(specPath);
-  const existingProjectId = await maybeFindProjectPageId(specData);
-  if (existingProjectId) {
-    console.log(`Project already exists (${existingProjectId}). Aborting.`);
+  const initSession = { started: true, success: false };
+  const repoRoot = resolveRepoRoot();
+  if (!repoRoot) {
+    console.error('Not inside a git repository. Aborting.');
     return;
   }
+  const projectRoot = repoRoot;
+  const defaultSpecPath = resolveDefaultSpecPath(projectRoot);
+  if (fs.existsSync(defaultSpecPath)) {
+    console.error(
+      'Init aborted: specs/notion-init.md already exists.\nPlease delete the spec file before re-running init.'
+    );
+    process.exit(1);
+  }
+  assertGitRepo(repoRoot);
+  const specPath = options.spec ? resolveSpecPath(options.spec) : defaultSpecPath;
+  const specData = options.spec ? parseSpec(specPath) : buildSpecData(projectRoot);
+
+  validateSpecTickets(specData);
+  const existingProjectId = await maybeFindProjectPageId(specData);
+  if (existingProjectId) {
+    console.error(`Project already exists (${existingProjectId}). Aborting.`);
+    process.exit(1);
+  }
   const projectPageId = await createProject(specData);
-  await createTickets(specData, projectPageId);
+  const createdTickets = await createTickets(specData, projectPageId);
+  if (createdTickets.length !== specData.tickets.length) {
+    throw new Error(
+      `Ticket creation incomplete: expected ${specData.tickets.length}, created ${createdTickets.length}`
+    );
+  }
+  ensureGitBranches(specData, repoRoot);
+  if (!options.spec) {
+    writeSpecFile(specPath, specData);
+  }
+  initSession.success = true;
+  console.log(`Project Key: ${specData.project['Project Key']}`);
+  console.log(`Project Page ID: ${projectPageId}`);
+  console.log(`Ticket Numbers: ${createdTickets.join(', ')}`);
 }
 
 main().catch((error) => {
   console.error('Error:', error.message || error);
+  console.error('Please fix the issue and re-run init.');
   process.exit(1);
 });
