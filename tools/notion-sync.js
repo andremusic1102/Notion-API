@@ -1188,8 +1188,18 @@ async function syncDaily() {
     console.error("Invalid command. Use 'init' for new projects or 'sync' for daily updates.");
     return;
   }
-  const result = await syncGitLog('last-sync', { suppressNoChanges: true });
-  if (result.changes === 0) {
+  const repoRoot = resolveRepoRoot();
+  const specPath = resolveDefaultSpecPath(repoRoot);
+  let diffResult = { changes: 0, forceCommentTicketIds: new Set() };
+  if (specPath && fs.existsSync(specPath)) {
+    diffResult = await diffSync(specPath, { suppressNoChanges: true });
+  }
+  const result = await syncGitLog('last-sync', {
+    suppressNoChanges: true,
+    forceCommentTicketIds: diffResult.forceCommentTicketIds,
+  });
+  const totalChanges = (diffResult.changes || 0) + (result.changes || 0);
+  if (totalChanges === 0) {
     console.log('No changes today');
   }
 }
