@@ -22,6 +22,8 @@ Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comme
 
 Run init inside a project root. If `--spec` is omitted, it generates `docs/notion-init.md`.
 Use `--spec` for custom paths.
+Init also creates and pushes Ticket branches to `origin` without checking them out.
+Branches that already exist on the remote are skipped.
 
 ```bash
 # Recommended

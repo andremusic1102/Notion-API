@@ -407,6 +407,26 @@ function runGit(command, failureMessage, cwd) {
   }
 }
 
+function readRemoteBranches(repoRoot) {
+  try {
+    const output = runGit('git ls-remote --heads origin', 'Failed to list remote branches', repoRoot);
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    const branches = new Set();
+    for (const line of lines) {
+      const parts = line.split(/\s+/);
+      const ref = parts[1] || '';
+      const match = ref.match(/^refs\/heads\/(.+)$/);
+      if (match) {
+        branches.add(match[1]);
+      }
+    }
+    return { branches, available: true };
+  } catch (error) {
+    console.warn('Warning: Unable to access origin. Skipping remote branch checks.');
+    return { branches: new Set(), available: false };
+  }
+}
+
 function ensureGitBranches(specData, repoRoot) {
   assertGitRepo(repoRoot);
 
@@ -428,7 +448,7 @@ function ensureGitBranches(specData, repoRoot) {
     detected.push(branch);
   }
 
-  console.log(`Detected ticket branches: ${detected.length > 0 ? detected.join(', ') : '(none)'}`);
+  console.log(`Branches defined in spec: ${detected.length > 0 ? detected.join(', ') : '(none)'}`);
   for (const branch of skipped) {
     console.log(`Skipped branch: ${branch}`);
   }
@@ -447,14 +467,77 @@ function ensureGitBranches(specData, repoRoot) {
       .filter(Boolean)
   );
 
+  const remoteInfo = readRemoteBranches(repoRoot);
+  const remoteBranches = remoteInfo.branches;
+  if (remoteInfo.available) {
+    console.log(
+      `Remote branches existing: ${remoteBranches.size > 0 ? Array.from(remoteBranches).join(', ') : '(none)'}`
+    );
+  }
+
+  const createdLocal = [];
+  const pushedRemote = [];
+  const alreadyRemote = [];
+  const localOnly = [];
+
   for (const branch of detected) {
     if (existing.has(branch)) {
       console.log(`Branch already exists: ${branch}`);
+    } else {
+      runGit(`git branch ${branch}`, `Failed to create git branch ${branch}`, repoRoot);
+      existing.add(branch);
+      createdLocal.push(branch);
+      console.log(`Created git branch: ${branch}`);
+    }
+
+    if (!remoteInfo.available) {
+      localOnly.push(branch);
       continue;
     }
-    runGit(`git branch ${branch}`, `Failed to create git branch ${branch}`, repoRoot);
-    existing.add(branch);
-    console.log(`Created git branch: ${branch}`);
+
+    if (remoteBranches.has(branch)) {
+      alreadyRemote.push(branch);
+      console.log(`Branch already exists on remote: ${branch}`);
+      continue;
+    }
+
+    try {
+      runGit(`git push -u origin ${branch}`, `Failed to push git branch ${branch}`, repoRoot);
+      pushedRemote.push(branch);
+      remoteBranches.add(branch);
+      console.log(`Pushed git branch to remote: ${branch}`);
+    } catch (error) {
+      console.warn(`Warning: ${error.message || error}`);
+      localOnly.push(branch);
+    }
+  }
+
+  if (createdLocal.length > 0) {
+    console.log(`Local branches created: ${createdLocal.join(', ')}`);
+  } else {
+    console.log('Local branches created: (none)');
+  }
+
+  if (remoteInfo.available) {
+    if (pushedRemote.length > 0) {
+      console.log(`Branches pushed to remote: ${pushedRemote.join(', ')}`);
+    } else {
+      console.log('Branches pushed to remote: (none)');
+    }
+
+    if (alreadyRemote.length > 0) {
+      console.log(`Branches already existing on remote: ${alreadyRemote.join(', ')}`);
+    } else {
+      console.log('Branches already existing on remote: (none)');
+    }
+
+    if (localOnly.length > 0) {
+      console.log(`Local-only branches: ${localOnly.join(', ')}`);
+    } else {
+      console.log('Local-only branches: (none)');
+    }
+  } else if (localOnly.length > 0) {
+    console.log(`Local-only branches: ${localOnly.join(', ')}`);
   }
 }
 
@@ -721,6 +804,14 @@ async function main() {
   ensureGitBranches(specData, repoRoot);
   const projectPageId = await createProject(specData);
   await createTickets(specData, projectPageId);
+  try {
+    const branch = runGit('git rev-parse --abbrev-ref HEAD', 'Failed to read current branch', repoRoot);
+    const status = runGit('git status -sb', 'Failed to read git status', repoRoot);
+    console.log(`Current branch: ${branch}`);
+    console.log(`Git status: ${status}`);
+  } catch (error) {
+    console.warn(`Warning: ${error.message || error}`);
+  }
 }
 
 main().catch((error) => {
