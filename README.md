@@ -1,39 +1,31 @@
 # Notion-API
 
-## What is this?
+## What this tool currently does
 
-Notion-API is a first-class project tracked in Notion.
-It provides deterministic tooling to sync Git activity and Markdown specs into Notion Projects and Tickets.
-Notion-API 本身就是一個被 Notion 管理的 Project，
-負責把 Git 行為與 Markdown 規格穩定同步到 Notion。
+- Initializes a Notion Project page and its Tickets from a Markdown spec generated at init time.
+- Generates init tickets from README sections (preferred) or folder structure (fallback).
+- Writes the spec to `<PROJECT_ROOT>/docs/notion-init.md` unless a custom `--spec` path is provided.
+- On sync, auto-commits tracked changes (never on `main`) and syncs the spec to Notion.
+- Updates ticket status/priority/last-sync/latest-commit based on rules, then mirrors to Notion.
+- Appends git commits as Notion ticket comments.
 
-## Workflow Alignment
-
-- Notion-API and Calories-Scanner follow the same workflow
-- Markdown spec is the only declarative source
-- Ticket Number is the immutable ID (Notion-API uses 1001+)
-- Git commits become Notion ticket comments
-- diff / sync flows stay identical across projects
-
-Notion-API 與 Calories-Scanner 採用完全一致的工作流：
-Markdown 唯一規格、Ticket Number 作為 immutable ID、Git → Notion comment、diff / sync 一致。
-
-## Initialize Notion-API
+## Two commands only
 
 ```bash
 node Notion-API/tools/notion-init.js init --spec Notion-API/specs/notion-init.md
-```
-
-- The init command is a one-time operation.
-- Running it again after initialization will fail by design.
-- init 指令只能執行一次。
-- 若 Project 已存在，再次執行將直接失敗，這是刻意設計的防呆行為。
-
-## Daily Sync
-
-```bash
 node Notion-API/tools/notion-sync.js sync
 ```
 
-- The sync command will automatically create a commit for tracked file changes using a standardized commit message before syncing to Notion.
-- sync 指令會在同步前，自動為已追蹤的檔案建立一筆規格化的 commit，再將該次工作同步到 Notion。
+## What is intentionally NOT automated
+
+- No sync on `main` (auto-commit is blocked).
+- No commit of untracked files (only `git add -u`).
+- No auto creation of new tickets during sync.
+- No automatic move to `Done` or status rollback.
+- No automatic changes to `Ticket Number`, `Project` relation, or formula fields.
+
+## Internal structure overview (for maintainers)
+
+- `Notion-API/tools/notion-init.js` creates the Project + initial Tickets and writes the spec.
+- `Notion-API/tools/notion-sync.js` auto-commits, parses git log, updates spec, syncs to Notion.
+- `Notion-API/tools/notion-rules.js` holds spec parsing/serialization and sync/init rules.

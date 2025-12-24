@@ -4,151 +4,27 @@ const path = require('path');
 const https = require('https');
 const { spawnSync } = require('child_process');
 
-// internal / local use
-const NOTION_TOKEN = "ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47";
+const {
+  defaultSpecPath,
+  loadSpecFile,
+  writeSpecFile,
+  computePriority,
+  normalizeTicketNumber,
+  nextStatusForSync,
+  maxLastSynced,
+} = require('./notion-rules');
+
+const NOTION_TOKEN = 'ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47';
 
 const PROJECTS_DB_ID = 'f5124c3d-1b2c-47da-87af-9d062d01fde7';
 const TICKETS_DB_ID = '6574df08-bf7c-4813-906f-5f3f3f819908';
 const NOTION_VERSION = '2022-06-28';
 
-function resolveSpecPath(specArg) {
-  if (!specArg) {
-    throw new Error('Missing --spec argument');
+function resolveSpecPath(specArg, projectRoot) {
+  if (specArg) {
+    return path.isAbsolute(specArg) ? specArg : path.resolve(projectRoot, specArg);
   }
-  return path.isAbsolute(specArg) ? specArg : path.resolve(process.cwd(), specArg);
-}
-
-function resolveDefaultSpecPath(repoRoot) {
-  if (!repoRoot) {
-    return null;
-  }
-  const candidates = [
-    path.join(repoRoot, 'specs', 'notion-init.md'),
-    path.join(repoRoot, 'docs', 'notion-init.md'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function splitKeyValue(line) {
-  const colonIndex = line.indexOf(':');
-  if (colonIndex === -1) {
-    return null;
-  }
-  const key = line.slice(0, colonIndex).trim();
-  const value = line.slice(colonIndex + 1).trim();
-  return { key, value };
-}
-
-function extractShortTitle(fullTitle) {
-  if (!fullTitle) {
-    return '';
-  }
-  const cjkChars = [];
-  for (const char of fullTitle) {
-    if (/[\u4E00-\u9FFF]/.test(char)) {
-      cjkChars.push(char);
-    }
-  }
-  if (cjkChars.length > 0) {
-    return cjkChars.slice(0, 3).join('');
-  }
-  const words = fullTitle.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, 3).join(' ');
-}
-
-function parseSpec(specPath) {
-  const raw = fs.readFileSync(specPath, 'utf8');
-  const lines = raw.split(/\r?\n/);
-  let section = null;
-  const projectLines = [];
-  const ticketLines = [];
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      continue;
-    }
-    if (trimmed.startsWith('Project:')) {
-      section = 'project';
-      continue;
-    }
-    if (trimmed.startsWith('Tickets:')) {
-      section = 'tickets';
-      continue;
-    }
-    if (section === 'project') {
-      projectLines.push(trimmed);
-    } else if (section === 'tickets') {
-      ticketLines.push(trimmed);
-    }
-  }
-
-  const project = {};
-  for (const line of projectLines) {
-    const normalized = line.replace(/^-+\s*/, '');
-    const parsed = splitKeyValue(normalized);
-    if (parsed) {
-      project[parsed.key] = parsed.value;
-    }
-  }
-
-  const tickets = [];
-  let currentTicket = null;
-  for (const line of ticketLines) {
-    const normalized = line.replace(/^-+\s*/, '');
-    if (normalized.startsWith('Title:')) {
-      if (currentTicket) {
-        tickets.push(currentTicket);
-      }
-      currentTicket = {};
-      const parsed = splitKeyValue(normalized);
-      if (parsed) {
-        const shortTitle = extractShortTitle(parsed.value);
-        currentTicket.Title = shortTitle || parsed.value;
-        currentTicket['Dev Notes'] = parsed.value;
-      }
-      continue;
-    }
-    if (!currentTicket) {
-      continue;
-    }
-    const parsed = splitKeyValue(normalized);
-    if (parsed) {
-      currentTicket[parsed.key] = parsed.value;
-    }
-  }
-  if (currentTicket) {
-    tickets.push(currentTicket);
-  }
-
-  return { project, tickets };
-}
-
-function titleFromBranch(branch) {
-  if (!branch) {
-    return 'General';
-  }
-  const parts = branch.split('/').slice(1).join('-').split(/[-_]+/).filter(Boolean);
-  const words = parts.slice(0, 3);
-  if (words.length === 0) {
-    return branch;
-  }
-  return words
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
-    .trim();
-}
-
-function buildDevNotes(projectName, description, branch, commits) {
-  const messages = (commits || []).map((commit) => commit.message).filter(Boolean);
-  const context = description ? ` ${description}` : '';
-  const commitText = messages.length > 0 ? ` Today's commits: ${messages.join('; ')}.` : '';
-  return `${projectName || 'Project'} update for ${branch}.${context}${commitText}`.trim();
+  return defaultSpecPath(projectRoot);
 }
 
 function buildTitle(value) {
@@ -214,19 +90,8 @@ function buildDate(value) {
   };
 }
 
-function addProperty(properties, name, builder, sourceName) {
-  const value = properties.sourceValues ? properties.sourceValues[sourceName || name] : null;
-  if (!value) {
-    return;
-  }
-  const built = builder(value);
-  if (built) {
-    properties.data[name] = built;
-  }
-}
-
 function notionRequest(url, payload, method = 'POST') {
-  const body = JSON.stringify(payload);
+  const body = payload ? JSON.stringify(payload) : '';
   const parsedUrl = new URL(url);
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -278,11 +143,8 @@ function notionComment(payload) {
   return notionRequest('https://api.notion.com/v1/comments', payload, 'POST');
 }
 
-function consolidateProperties(source) {
-  return {
-    data: {},
-    sourceValues: source,
-  };
+async function queryDatabase(databaseId, payload) {
+  return notionRequest(`https://api.notion.com/v1/databases/${databaseId}/query`, payload, 'POST');
 }
 
 function getSelectName(properties, name) {
@@ -321,345 +183,8 @@ function getDateValue(properties, name) {
   return properties[name].date.start || null;
 }
 
-function getStatusBranch() {
-  try {
-    const output = runGitCommand(['status', '--porcelain', '-b']);
-    const firstLine = output.split('\n')[0] || '';
-    const match = firstLine.match(/^##\s+([^\s.]+)/);
-    if (!match) {
-      return null;
-    }
-    const branch = match[1];
-    return branch === 'HEAD' ? null : branch;
-  } catch (error) {
-    return null;
-  }
-}
-
-async function createProject(specPath) {
-  const parsed = parseSpec(specPath);
-  if (!parsed.project['Project Name']) {
-    throw new Error('Project Name is required in the spec');
-  }
-  const props = consolidateProperties(parsed.project);
-  addProperty(props, 'Project Name', buildTitle, 'Project Name');
-  addProperty(props, 'Project Key', buildRichText, 'Project Key');
-  addProperty(props, 'Repository', buildRichText, 'Repository');
-  addProperty(props, 'Default Branch', buildRichText, 'Default Branch');
-  addProperty(props, 'Status', buildRichText, 'Status');
-  addProperty(props, 'Description', buildRichText, 'Description');
-
-  const payload = {
-    parent: {
-      database_id: PROJECTS_DB_ID,
-    },
-    properties: props.data,
-  };
-  const result = await notionPost(payload);
-  console.log(result.id);
-}
-
-async function createTickets(specPath, projectPageId) {
-  const parsed = parseSpec(specPath);
-  if (!Array.isArray(parsed.tickets) || parsed.tickets.length === 0) {
-    throw new Error('No tickets defined in the spec');
-  }
-  if (!projectPageId) {
-    throw new Error('Project page id is required to create tickets');
-  }
-  for (const ticket of parsed.tickets) {
-    const props = consolidateProperties(ticket);
-    addProperty(props, 'Title', buildTitle, 'Title');
-    addProperty(props, 'Ticket Number', buildNumber, 'Ticket Number');
-    addProperty(props, 'Priority', buildSelect, 'Priority');
-    addProperty(props, 'Status', buildSelect, 'Status');
-    addProperty(props, 'Type', buildSelect, 'Type');
-    addProperty(props, 'Branch', buildRichText, 'Branch');
-    addProperty(props, 'Dev Notes', buildRichText, 'Dev Notes');
-    props.data.Project = {
-      relation: [
-        {
-          id: projectPageId,
-        },
-      ],
-    };
-
-    const payload = {
-      parent: {
-        database_id: TICKETS_DB_ID,
-      },
-      properties: props.data,
-    };
-    const created = await notionPost(payload);
-    console.log(created.id);
-  }
-}
-
-async function queryDatabase(databaseId, payload) {
-  return notionRequest(`https://api.notion.com/v1/databases/${databaseId}/query`, payload, 'POST');
-}
-
-async function findProjectPageId(specData) {
-  const key = specData.project['Project Key'];
-  const name = specData.project['Project Name'];
-  const filters = [];
-  if (key) {
-    filters.push({
-      property: 'Project Key',
-      title: {
-        equals: key,
-      },
-    });
-  }
-  if (name) {
-    filters.push({
-      property: 'Project Name',
-      rich_text: {
-        equals: name,
-      },
-    });
-  }
-  if (filters.length === 0) {
-    throw new Error('Project Key or Project Name is required in the spec');
-  }
-  const payload = {
-    filter: filters.length === 1 ? filters[0] : { or: filters },
-    page_size: 1,
-  };
-  const result = await queryDatabase(PROJECTS_DB_ID, payload);
-  const pageId = result.results && result.results.length > 0 ? result.results[0].id : null;
-  if (!pageId) {
-    throw new Error('Project not found in Notion');
-  }
-  return pageId;
-}
-
-async function maybeFindProjectPageId(specData) {
-  const key = specData.project['Project Key'];
-  const name = specData.project['Project Name'];
-  const filters = [];
-  if (key) {
-    filters.push({
-      property: 'Project Key',
-      title: {
-        equals: key,
-      },
-    });
-  }
-  if (name) {
-    filters.push({
-      property: 'Project Name',
-      rich_text: {
-        equals: name,
-      },
-    });
-  }
-  if (filters.length === 0) {
-    return null;
-  }
-  const payload = {
-    filter: filters.length === 1 ? filters[0] : { or: filters },
-    page_size: 1,
-  };
-  const result = await queryDatabase(PROJECTS_DB_ID, payload);
-  return result.results && result.results.length > 0 ? result.results[0].id : null;
-}
-
-async function fetchTicketsByProject(projectPageId) {
-  const tickets = [];
-  let cursor = null;
-  do {
-    const payload = {
-      filter: {
-        property: 'Project',
-        relation: {
-          contains: projectPageId,
-        },
-      },
-      page_size: 100,
-    };
-    if (cursor) {
-      payload.start_cursor = cursor;
-    }
-    const result = await queryDatabase(TICKETS_DB_ID, payload);
-    if (Array.isArray(result.results)) {
-      tickets.push(...result.results);
-    }
-    cursor = result.has_more ? result.next_cursor : null;
-  } while (cursor);
-  return tickets;
-}
-
-function buildTicketPayloadFromSpec(ticket, projectPageId) {
-  const props = consolidateProperties(ticket);
-  addProperty(props, 'Title', buildTitle, 'Title');
-  addProperty(props, 'Ticket Number', buildNumber, 'Ticket Number');
-  addProperty(props, 'Priority', buildSelect, 'Priority');
-  addProperty(props, 'Status', buildSelect, 'Status');
-  addProperty(props, 'Type', buildSelect, 'Type');
-  addProperty(props, 'Branch', buildRichText, 'Branch');
-  addProperty(props, 'Dev Notes', buildRichText, 'Dev Notes');
-  props.data.Project = {
-    relation: [
-      {
-        id: projectPageId,
-      },
-    ],
-  };
-  return {
-    parent: {
-      database_id: TICKETS_DB_ID,
-    },
-    properties: props.data,
-  };
-}
-
-async function updatePageProperties(pageId, properties) {
-  if (!pageId || !properties || Object.keys(properties).length === 0) {
-    return null;
-  }
-  return notionPatch(`https://api.notion.com/v1/pages/${pageId}`, { properties });
-}
-
-let cachedRepoRoot = null;
-
-function resolveRepoRoot() {
-  if (cachedRepoRoot !== null) {
-    return cachedRepoRoot;
-  }
-  const candidates = [process.cwd(), path.resolve(__dirname, '..')];
-  for (const candidate of candidates) {
-    const result = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-      encoding: 'utf8',
-      cwd: candidate,
-    });
-    if (result.status === 0) {
-      cachedRepoRoot = result.stdout.trim();
-      return cachedRepoRoot;
-    }
-  }
-  cachedRepoRoot = null;
-  return null;
-}
-
-function repoNameFromRoot(repoRoot) {
-  return repoRoot ? path.basename(repoRoot) : null;
-}
-
-function allowedBranchPrefixes(repoRoot) {
-  const repoName = repoNameFromRoot(repoRoot);
-  if (repoName === 'Notion-API') {
-    return ['chore/', 'techdebt/'];
-  }
-  return ['feature/', 'techdebt/', 'chore/'];
-}
-
-function isAllowedBranch(branch, prefixes) {
-  if (!branch) {
-    return false;
-  }
-  return prefixes.some((prefix) => branch.startsWith(prefix));
-}
-
-async function appendTicketsToSpec(specPath, tickets) {
-  if (!tickets || tickets.length === 0) {
-    return 0;
-  }
-  const content = fs.readFileSync(specPath, 'utf8');
-  const endsWithNewline = content.endsWith('\n');
-  const lines = [];
-  if (!endsWithNewline) {
-    lines.push('');
-  }
-  for (const ticket of tickets) {
-    lines.push(
-      `- Title: ${ticket.Title}`,
-      `  Ticket Number: ${ticket['Ticket Number']}`,
-      `  Priority: ${ticket.Priority}`,
-      `  Status: ${ticket.Status}`,
-      `  Type: ${ticket.Type}`,
-      `  Branch: ${ticket.Branch}`,
-      `  Dev Notes: ${ticket['Dev Notes']}`
-    );
-  }
-  fs.appendFileSync(specPath, `${lines.join('\n')}\n`, 'utf8');
-  return tickets.length;
-}
-
-async function updateSpecFromGit() {
-  const repoRoot = resolveRepoRoot();
-  if (!repoRoot) {
-    throw new Error('Unable to resolve git repo root');
-  }
-  const specPath = resolveDefaultSpecPath(repoRoot);
-  if (!specPath || !fs.existsSync(specPath)) {
-    throw new Error(`Spec file not found: ${specPath || 'unknown'}`);
-  }
-  const specData = parseSpec(specPath);
-  const existingBranches = new Set(
-    (specData.tickets || []).map((ticket) => ticket.Branch).filter(Boolean)
-  );
-  const existingNumbers = (specData.tickets || [])
-    .map((ticket) => Number(ticket['Ticket Number']))
-    .filter((value) => !Number.isNaN(value));
-  const nextNumberStart = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 2001;
-
-  const commits = parseGitLog('midnight');
-  const fallbackBranch = currentBranchName();
-  const groupedCommits = groupCommitsByBranch(commits, fallbackBranch);
-  const candidateBranches = new Set();
-  const statusBranch = getStatusBranch();
-  if (statusBranch) {
-    candidateBranches.add(statusBranch);
-  }
-  for (const branch of groupedCommits.keys()) {
-    if (branch) {
-      candidateBranches.add(branch);
-    }
-  }
-
-  const newTickets = [];
-  let ticketNumber = nextNumberStart;
-  const projectName = specData.project['Project Name'];
-  const projectDescription = specData.project.Description;
-
-  const prefixes = allowedBranchPrefixes(repoRoot);
-  const sortedBranches = Array.from(candidateBranches).sort();
-  for (const branch of sortedBranches) {
-    if (!branch || existingBranches.has(branch)) {
-      continue;
-    }
-    if (!isAllowedBranch(branch, prefixes)) {
-      continue;
-    }
-    const branchCommits = groupedCommits.get(branch) || [];
-    const title = titleFromBranch(branch);
-    const devNotes = buildDevNotes(projectName, projectDescription, branch, branchCommits);
-    const type = branch.startsWith('techdebt/') ? 'Tech Debt' : 'Feature';
-    const priority = branch.startsWith('techdebt/') ? 'Low' : 'Medium';
-    newTickets.push({
-      Title: title,
-      'Ticket Number': ticketNumber,
-      Priority: priority,
-      Status: 'Backlog',
-      Type: type,
-      Branch: branch,
-      'Dev Notes': devNotes,
-    });
-    existingBranches.add(branch);
-    ticketNumber += 1;
-  }
-
-  const appendedCount = await appendTicketsToSpec(specPath, newTickets);
-  for (const ticket of newTickets) {
-    console.log(`Appended spec ticket ${ticket['Ticket Number']} (${ticket.Branch})`);
-  }
-  return { appendedCount, specPath, groupedCommits };
-}
-
 function runGitCommand(args, options = {}) {
-  const repoRoot = options.cwd || resolveRepoRoot();
-  const result = spawnSync('git', args, { encoding: 'utf8', cwd: repoRoot || process.cwd() });
+  const result = spawnSync('git', args, { encoding: 'utf8', cwd: options.cwd });
   if (result.error) {
     throw result.error;
   }
@@ -669,58 +194,20 @@ function runGitCommand(args, options = {}) {
   return result.stdout;
 }
 
-function normalizeSince(value) {
-  if (!value || value === 'today') {
-    return 'midnight';
-  }
-  return value;
-}
-
-async function getLastSyncBaseline() {
-  const repoRoot = resolveRepoRoot();
-  if (!repoRoot) {
-    console.log('No Last Synced found, falling back to today');
-    return 'midnight';
-  }
-  const specPath = resolveDefaultSpecPath(repoRoot);
-  if (!specPath || !fs.existsSync(specPath)) {
-    console.log('No Last Synced found, falling back to today');
-    return 'midnight';
-  }
-  const specData = parseSpec(specPath);
-  let projectPageId = null;
+function currentBranchName(projectRoot) {
   try {
-    projectPageId = await findProjectPageId(specData);
+    return runGitCommand(['symbolic-ref', '-q', '--short', 'HEAD'], { cwd: projectRoot }).trim();
   } catch (error) {
-    console.log('No Last Synced found, falling back to today');
-    return 'midnight';
+    return null;
   }
-  const tickets = await fetchTicketsByProject(projectPageId);
-  let maxDate = null;
-  for (const ticket of tickets) {
-    const lastSynced = getDateValue(ticket.properties, 'Last Synced');
-    if (!lastSynced) {
-      continue;
-    }
-    if (!maxDate || new Date(lastSynced) > new Date(maxDate)) {
-      maxDate = lastSynced;
-    }
-  }
-  if (!maxDate) {
-    console.log('No Last Synced found, falling back to today');
-    return 'midnight';
-  }
-  return maxDate;
 }
 
-function parseGitLog(sinceValue) {
+function parseGitLog(projectRoot, sinceValue) {
   const format = '%H%x1F%an%x1F%s%x1F%cI%x1F%d%x1E';
-  const output = runGitCommand([
-    'log',
-    `--since=${sinceValue}`,
-    `--pretty=format:${format}`,
-    '--decorate=short',
-  ]).trim();
+  const output = runGitCommand(
+    ['log', `--since=${sinceValue}`, `--pretty=format:${format}`, '--decorate=short'],
+    { cwd: projectRoot }
+  ).trim();
   if (!output) {
     return [];
   }
@@ -764,9 +251,9 @@ function extractBranchFromDecorations(decoration) {
   return null;
 }
 
-function getBranchesContainingCommit(commitHash) {
+function getBranchesContainingCommit(projectRoot, commitHash) {
   try {
-    const output = runGitCommand(['branch', '--contains', commitHash]);
+    const output = runGitCommand(['branch', '--contains', commitHash], { cwd: projectRoot });
     return output
       .split('\n')
       .map((line) => line.replace('*', '').trim())
@@ -784,12 +271,12 @@ function extractBranchFromMessage(message) {
   return match ? match[1] : null;
 }
 
-function determineBranch(commit, fallbackBranch) {
+function determineBranch(projectRoot, commit, fallbackBranch) {
   const fromDecor = extractBranchFromDecorations(commit.decoration);
   if (fromDecor) {
     return fromDecor;
   }
-  const branches = getBranchesContainingCommit(commit.hash);
+  const branches = getBranchesContainingCommit(projectRoot, commit.hash);
   for (const branch of branches) {
     if (!branch.startsWith('origin/') && branch !== 'HEAD') {
       return branch;
@@ -802,6 +289,22 @@ function determineBranch(commit, fallbackBranch) {
   return fallbackBranch;
 }
 
+function groupCommitsByBranch(projectRoot, commits, fallbackBranch) {
+  const grouped = new Map();
+  const ordered = [...commits].reverse();
+  for (const commit of ordered) {
+    const branch = determineBranch(projectRoot, commit, fallbackBranch);
+    if (!branch) {
+      grouped.set(null, (grouped.get(null) || []).concat(commit));
+      continue;
+    }
+    const list = grouped.get(branch) || [];
+    list.push(commit);
+    grouped.set(branch, list);
+  }
+  return grouped;
+}
+
 function shortHash(hash) {
   if (!hash) {
     return '';
@@ -809,26 +312,82 @@ function shortHash(hash) {
   return hash.slice(0, 7);
 }
 
-async function findTicketForBranch(branchName, cache) {
-  if (!branchName) {
-    return null;
+function commitsAfterLatest(commits, latestCommit) {
+  if (!latestCommit) {
+    return commits;
   }
-  if (cache[branchName]) {
-    return cache[branchName];
+  const index = commits.findIndex((commit) => shortHash(commit.hash) === latestCommit);
+  if (index === -1) {
+    return commits;
+  }
+  return commits.slice(index + 1);
+}
+
+async function findProjectPage(specData) {
+  const key = specData.project['Project Key'];
+  const name = specData.project['Project Name'];
+  const filters = [];
+  if (key) {
+    filters.push({
+      property: 'Project Key',
+      title: {
+        equals: key,
+      },
+    });
+  }
+  if (name) {
+    filters.push({
+      property: 'Project Name',
+      rich_text: {
+        equals: name,
+      },
+    });
+  }
+  if (filters.length === 0) {
+    throw new Error('Project Key or Project Name is required in the spec');
   }
   const payload = {
-    filter: {
-      property: 'Branch',
-      rich_text: {
-        equals: branchName,
-      },
-    },
+    filter: filters.length === 1 ? filters[0] : { or: filters },
     page_size: 1,
   };
-  const result = await queryDatabase(TICKETS_DB_ID, payload);
+  const result = await queryDatabase(PROJECTS_DB_ID, payload);
   const page = result.results && result.results.length > 0 ? result.results[0] : null;
-  cache[branchName] = page || null;
-  return page || null;
+  if (!page) {
+    throw new Error('Project not found in Notion');
+  }
+  return page;
+}
+
+async function fetchTicketsByProject(projectPageId) {
+  const tickets = [];
+  let cursor = null;
+  do {
+    const payload = {
+      filter: {
+        property: 'Project',
+        relation: {
+          contains: projectPageId,
+        },
+      },
+      page_size: 100,
+    };
+    if (cursor) {
+      payload.start_cursor = cursor;
+    }
+    const result = await queryDatabase(TICKETS_DB_ID, payload);
+    if (Array.isArray(result.results)) {
+      tickets.push(...result.results);
+    }
+    cursor = result.has_more ? result.next_cursor : null;
+  } while (cursor);
+  return tickets;
+}
+
+async function updatePageProperties(pageId, properties) {
+  if (!pageId || !properties || Object.keys(properties).length === 0) {
+    return null;
+  }
+  return notionPatch(`https://api.notion.com/v1/pages/${pageId}`, { properties });
 }
 
 async function postCommitComment(pageId, commit) {
@@ -851,355 +410,85 @@ async function postCommitComment(pageId, commit) {
   await notionComment(payload);
 }
 
-function currentBranchName() {
-  try {
-    return runGitCommand(['symbolic-ref', '-q', '--short', 'HEAD']).trim();
-  } catch (error) {
-    return null;
+function buildTicketUpdatesFromSpec(specTicket, existingProps) {
+  const updates = {};
+  if (specTicket.Title && specTicket.Title !== getTitleValue(existingProps, 'Title')) {
+    updates.Title = buildTitle(specTicket.Title);
   }
+  if (specTicket['Dev Notes'] && specTicket['Dev Notes'] !== getRichTextValue(existingProps, 'Dev Notes')) {
+    updates['Dev Notes'] = buildRichText(specTicket['Dev Notes']);
+  }
+  if (specTicket.Branch && specTicket.Branch !== getRichTextValue(existingProps, 'Branch')) {
+    updates.Branch = buildRichText(specTicket.Branch);
+  }
+  if (specTicket.Priority && specTicket.Priority !== getSelectName(existingProps, 'Priority')) {
+    updates.Priority = buildSelect(specTicket.Priority);
+  }
+  if (specTicket.Status && specTicket.Status !== getSelectName(existingProps, 'Status')) {
+    updates.Status = buildSelect(specTicket.Status);
+  }
+  if (specTicket.Type && specTicket.Type !== getSelectName(existingProps, 'Type')) {
+    updates.Type = buildSelect(specTicket.Type);
+  }
+  if (specTicket['Last Synced'] && specTicket['Last Synced'] !== getDateValue(existingProps, 'Last Synced')) {
+    updates['Last Synced'] = buildDate(specTicket['Last Synced']);
+  }
+  if (specTicket['Latest Commit'] && specTicket['Latest Commit'] !== getRichTextValue(existingProps, 'Latest Commit')) {
+    updates['Latest Commit'] = buildRichText(specTicket['Latest Commit']);
+  }
+  return updates;
 }
 
-function commitScopeFromBranch(branch) {
-  if (!branch) {
-    return 'unknown';
+function buildProjectUpdatesFromSpec(specProject, existingProps) {
+  const updates = {};
+  if (specProject['Project Key'] && specProject['Project Key'] !== getTitleValue(existingProps, 'Project Key')) {
+    updates['Project Key'] = buildTitle(specProject['Project Key']);
   }
-  const parts = branch.split('/').filter(Boolean);
-  if (parts.length <= 1) {
-    return branch;
+  if (specProject['Project Name'] && specProject['Project Name'] !== getRichTextValue(existingProps, 'Project Name')) {
+    updates['Project Name'] = buildRichText(specProject['Project Name']);
   }
-  return parts.slice(1).join('/');
+  if (specProject.Repository && specProject.Repository !== getRichTextValue(existingProps, 'Repository')) {
+    updates.Repository = buildRichText(specProject.Repository);
+  }
+  if (specProject['Default Branch'] && specProject['Default Branch'] !== getRichTextValue(existingProps, 'Default Branch')) {
+    updates['Default Branch'] = buildRichText(specProject['Default Branch']);
+  }
+  if (specProject.Status && specProject.Status !== getSelectName(existingProps, 'Status')) {
+    updates.Status = buildSelect(specProject.Status);
+  }
+  if (specProject.Description && specProject.Description !== getRichTextValue(existingProps, 'Description')) {
+    updates.Description = buildRichText(specProject.Description);
+  }
+  return updates;
 }
 
-function autoCommitIfNeeded() {
-  const branch = currentBranchName();
+function autoCommitIfNeeded(projectRoot) {
+  const branch = currentBranchName(projectRoot);
   if (branch === 'main') {
     console.error('Refusing to auto-commit on main branch. Switch to a work branch.');
     process.exit(1);
   }
 
-  const status = runGitCommand(['status', '--porcelain']);
+  const status = runGitCommand(['status', '--porcelain'], { cwd: projectRoot });
   if (!status.trim()) {
     return { committed: false, failed: false };
   }
 
-  runGitCommand(['add', '-u']);
-  const scope = commitScopeFromBranch(branch);
+  runGitCommand(['add', '-u'], { cwd: projectRoot });
+  const scope = branch ? branch.split('/').slice(1).join('/') || branch : 'sync';
   const message = `chore(${scope}): sync work session updates`;
   try {
-    runGitCommand(['commit', '-m', message]);
+    runGitCommand(['commit', '-m', message], { cwd: projectRoot });
   } catch (error) {
     console.error(error.message || error);
     return { committed: false, failed: true };
   }
 
-  const hash = runGitCommand(['rev-parse', '--short', 'HEAD']).trim();
+  const hash = runGitCommand(['rev-parse', '--short', 'HEAD'], { cwd: projectRoot }).trim();
   if (hash) {
     console.log(hash);
   }
   return { committed: true, failed: false, hash };
-}
-
-function groupCommitsByBranch(commits, fallbackBranch) {
-  const grouped = new Map();
-  const ordered = [...commits].reverse();
-  for (const commit of ordered) {
-    const branch = determineBranch(commit, fallbackBranch);
-    if (!branch) {
-      grouped.set(null, (grouped.get(null) || []).concat(commit));
-      continue;
-    }
-    const list = grouped.get(branch) || [];
-    list.push(commit);
-    grouped.set(branch, list);
-  }
-  return grouped;
-}
-
-function shouldAdvanceStatus(statusName, hasCommits) {
-  return statusName === 'Backlog' && hasCommits;
-}
-
-async function syncGitLog(sinceValue, options = {}) {
-  let normalizedSince = normalizeSince(sinceValue);
-  if (sinceValue === 'last-sync') {
-    normalizedSince = await getLastSyncBaseline();
-  }
-  const commits = parseGitLog(normalizedSince);
-  if (!commits.length) {
-    if (!options.suppressNoChanges) {
-      console.log('No changes');
-    }
-    return { changes: 0 };
-  }
-  const ticketCache = {};
-  const fallbackBranch = currentBranchName();
-  const grouped = groupCommitsByBranch(commits, fallbackBranch);
-  const nowIso = new Date().toISOString();
-  let changes = 0;
-  const repoRoot = resolveRepoRoot();
-  const prefixes = allowedBranchPrefixes(repoRoot);
-
-  for (const [branch, branchCommits] of grouped.entries()) {
-    if (!branch) {
-      for (const commit of branchCommits) {
-        console.log(`Skipping commit ${commit.hash} - branch could not be determined`);
-      }
-      continue;
-    }
-    if (!isAllowedBranch(branch, prefixes)) {
-      console.log(`Skipping branch ${branch} - unsupported prefix`);
-      continue;
-    }
-    const ticket = await findTicketForBranch(branch, ticketCache);
-    if (!ticket) {
-      console.log(`No ticket found for branch ${branch}`);
-      continue;
-    }
-    const properties = ticket.properties || {};
-    const ticketNumber = getNumberValue(properties, 'Ticket Number');
-    const latestCommit = getRichTextValue(properties, 'Latest Commit');
-    const statusName = getSelectName(properties, 'Status');
-    const lastSynced = getDateValue(properties, 'Last Synced');
-
-    const forced = options.forceCommentTicketIds && options.forceCommentTicketIds.has(ticket.id);
-    const shouldSkipUntilFound =
-      !forced &&
-      latestCommit &&
-      branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
-    let startAppending = !shouldSkipUntilFound;
-    let appendedAny = false;
-    let newestCommit = null;
-
-    for (const commit of branchCommits) {
-      const commitShort = shortHash(commit.hash);
-      if (!startAppending) {
-        if (commitShort === latestCommit) {
-          startAppending = true;
-        }
-        continue;
-      }
-      await postCommitComment(ticket.id, commit);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
-      appendedAny = true;
-      newestCommit = commitShort;
-      changes += 1;
-    }
-
-    const propertyUpdates = {};
-    if (appendedAny && newestCommit && newestCommit !== latestCommit) {
-      propertyUpdates['Latest Commit'] = buildRichText(newestCommit);
-    }
-    if (appendedAny) {
-      propertyUpdates['Last Synced'] = buildDate(nowIso);
-    }
-    if (shouldAdvanceStatus(statusName, appendedAny)) {
-      propertyUpdates.Status = buildSelect('In Progress');
-    }
-    if (Object.keys(propertyUpdates).length > 0) {
-      await updatePageProperties(ticket.id, propertyUpdates);
-      const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Updated ticket ${ticketLabel}`);
-      changes += 1;
-    }
-  }
-  if (changes === 0 && !options.suppressNoChanges) {
-    console.log('No changes');
-  }
-  return { changes };
-}
-
-async function diffSync(specPath, options = {}) {
-  const specData = parseSpec(specPath);
-  if (!Array.isArray(specData.tickets) || specData.tickets.length === 0) {
-    if (!options.suppressNoChanges) {
-      console.log('No changes');
-    }
-    return { changes: 0, forceCommentTicketIds: new Set() };
-  }
-  const projectPageId = await findProjectPageId(specData);
-  const existingTickets = await fetchTicketsByProject(projectPageId);
-  const existingByNumber = new Map();
-  for (const ticket of existingTickets) {
-    const number = getNumberValue(ticket.properties, 'Ticket Number');
-    if (number !== null && number !== undefined) {
-      existingByNumber.set(number, ticket);
-    }
-  }
-
-  const commits = parseGitLog('midnight');
-  const fallbackBranch = currentBranchName();
-  const groupedCommits = groupCommitsByBranch(commits, fallbackBranch);
-  const today = new Date().toISOString().slice(0, 10);
-  let changes = 0;
-  const forceCommentTicketIds = new Set();
-  const seenNumbers = new Set();
-
-  for (const ticketSpec of specData.tickets) {
-    const rawNumber = ticketSpec['Ticket Number'];
-    const number = Number(rawNumber);
-    if (Number.isNaN(number)) {
-      console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
-      continue;
-    }
-    if (seenNumbers.has(number)) {
-      console.log(`Skipping duplicate Ticket Number in spec: ${number}`);
-      continue;
-    }
-    seenNumbers.add(number);
-
-    const branch = ticketSpec.Branch;
-    const hasCommits = branch && groupedCommits.has(branch) && groupedCommits.get(branch).length > 0;
-    const existing = existingByNumber.get(number);
-    const branchCommits = branch ? groupedCommits.get(branch) || [] : [];
-    const latestCommit = branchCommits.length > 0 ? shortHash(branchCommits[branchCommits.length - 1].hash) : null;
-
-    if (!existing) {
-      const payload = buildTicketPayloadFromSpec(ticketSpec, projectPageId);
-      payload.properties['Last Synced'] = buildDate(today);
-      if (latestCommit) {
-        payload.properties['Latest Commit'] = buildRichText(latestCommit);
-      }
-      const created = await notionPost(payload);
-      console.log(`Created ticket ${number} (${created.id})`);
-      changes += 1;
-      if (hasCommits) {
-        await updatePageProperties(created.id, { Status: buildSelect('In Progress') });
-        console.log(`Updated ticket ${number} (${created.id}) status to In Progress`);
-        changes += 1;
-        forceCommentTicketIds.add(created.id);
-      }
-      continue;
-    }
-
-    const updates = {};
-    const updatedFields = [];
-    const statusName = getSelectName(existing.properties, 'Status');
-    const lastSynced = getDateValue(existing.properties, 'Last Synced');
-    const currentTitle = getTitleValue(existing.properties, 'Title');
-    const currentDevNotes = getRichTextValue(existing.properties, 'Dev Notes');
-    const currentBranch = getRichTextValue(existing.properties, 'Branch');
-    const currentPriority = getSelectName(existing.properties, 'Priority');
-    const currentType = getSelectName(existing.properties, 'Type');
-
-    if (ticketSpec.Title && ticketSpec.Title !== currentTitle) {
-      updates.Title = buildTitle(ticketSpec.Title);
-      updatedFields.push('Title');
-    }
-    if (ticketSpec['Dev Notes'] && ticketSpec['Dev Notes'] !== currentDevNotes) {
-      updates['Dev Notes'] = buildRichText(ticketSpec['Dev Notes']);
-      updatedFields.push('Dev Notes');
-    }
-    if (ticketSpec.Branch && ticketSpec.Branch !== currentBranch) {
-      updates.Branch = buildRichText(ticketSpec.Branch);
-      updatedFields.push('Branch');
-    }
-    if (ticketSpec.Priority && ticketSpec.Priority !== currentPriority) {
-      updates.Priority = buildSelect(ticketSpec.Priority);
-      updatedFields.push('Priority');
-    }
-    if (ticketSpec.Type && ticketSpec.Type !== currentType) {
-      updates.Type = buildSelect(ticketSpec.Type);
-      updatedFields.push('Type');
-    }
-    if (shouldAdvanceStatus(statusName, hasCommits) && ticketSpec.Status === 'Backlog') {
-      updates.Status = buildSelect('In Progress');
-      updatedFields.push('Status');
-    }
-    if (lastSynced !== today) {
-      updates['Last Synced'] = buildDate(today);
-      updatedFields.push('Last Synced');
-    }
-    const existingLatestCommit = getRichTextValue(existing.properties, 'Latest Commit');
-    if (latestCommit && latestCommit !== existingLatestCommit) {
-      updates['Latest Commit'] = buildRichText(latestCommit);
-      updatedFields.push('Latest Commit');
-      forceCommentTicketIds.add(existing.id);
-    }
-    if (Object.keys(updates).length > 0) {
-      await updatePageProperties(existing.id, updates);
-      console.log(`Updated Ticket ${number}: [${updatedFields.join(', ')}]`);
-      changes += 1;
-    }
-  }
-
-  if (changes === 0 && !options.suppressNoChanges) {
-    console.log('No changes');
-  }
-  return { changes, forceCommentTicketIds };
-}
-
-async function initProject(specPath) {
-  const specData = parseSpec(specPath);
-  const existingProjectId = await maybeFindProjectPageId(specData);
-  if (existingProjectId) {
-    throw new Error("Project already initialized. Use 'sync' instead.");
-  }
-  const projectProps = consolidateProperties(specData.project);
-  addProperty(projectProps, 'Project Key', buildTitle, 'Project Key');
-  addProperty(projectProps, 'Project Name', buildRichText, 'Project Name');
-  addProperty(projectProps, 'Repository', buildRichText, 'Repository');
-  addProperty(projectProps, 'Default Branch', buildRichText, 'Default Branch');
-  addProperty(projectProps, 'Status', buildSelect, 'Status');
-  addProperty(projectProps, 'Description', buildRichText, 'Description');
-
-  const projectPayload = {
-    parent: {
-      database_id: PROJECTS_DB_ID,
-    },
-    properties: projectProps.data,
-  };
-  const project = await notionPost(projectPayload);
-  console.log(`Created project ${project.id}`);
-
-  const projectPageId = project.id;
-  const existingTickets = await fetchTicketsByProject(projectPageId);
-  const existingByNumber = new Map();
-  for (const ticket of existingTickets) {
-    const number = getNumberValue(ticket.properties, 'Ticket Number');
-    if (number !== null && number !== undefined) {
-      existingByNumber.set(number, ticket);
-    }
-  }
-
-  let changes = 0;
-  const today = new Date().toISOString().slice(0, 10);
-  for (const ticketSpec of specData.tickets) {
-    const rawNumber = ticketSpec['Ticket Number'];
-    const number = Number(rawNumber);
-    if (Number.isNaN(number)) {
-      console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
-      continue;
-    }
-    if (existingByNumber.has(number)) {
-      console.log(`Ticket ${number} already exists`);
-      continue;
-    }
-    const payload = buildTicketPayloadFromSpec(ticketSpec, projectPageId);
-    payload.properties['Last Synced'] = buildDate(today);
-    const created = await notionPost(payload);
-    console.log(`Created ticket ${number} (${created.id})`);
-    changes += 1;
-  }
-  if (changes === 0) {
-    console.log('No changes');
-  }
-}
-
-async function syncDaily() {
-  const invalidSince = process.argv.includes('--since');
-  if (invalidSince) {
-    console.error("Invalid command. Use 'init' for new projects or 'sync' for daily updates.");
-    return;
-  }
-  const autoCommitResult = autoCommitIfNeeded();
-  if (autoCommitResult.failed) {
-    return;
-  }
-  const result = await syncGitLog('last-sync', { suppressNoChanges: true });
-  if (result.changes === 0) {
-    console.log('No changes today');
-  }
 }
 
 function parseArgs(argv) {
@@ -1218,28 +507,147 @@ function parseArgs(argv) {
 }
 
 function showUsage() {
-  console.error(
-    "Usage: node notion-sync.js init --spec <path> | node notion-sync.js sync"
-  );
+  console.error('Usage: node notion-sync.js sync [--spec <path-to-spec>]');
+}
+
+async function syncProject(specPath, projectRoot) {
+  if (!fs.existsSync(specPath)) {
+    throw new Error(`Spec file not found: ${specPath}`);
+  }
+
+  const specData = loadSpecFile(specPath);
+  if (!specData.project || (!specData.project['Project Key'] && !specData.project['Project Name'])) {
+    throw new Error('Project Key or Project Name is required in the spec');
+  }
+
+  const projectPage = await findProjectPage(specData);
+  const projectPageId = projectPage.id;
+
+  const projectUpdates = buildProjectUpdatesFromSpec(specData.project, projectPage.properties);
+
+  const existingTickets = await fetchTicketsByProject(projectPageId);
+  const existingByNumber = new Map();
+  for (const ticket of existingTickets) {
+    const number = getNumberValue(ticket.properties, 'Ticket Number');
+    if (number !== null && number !== undefined) {
+      existingByNumber.set(number, ticket);
+    }
+  }
+
+  const baseline = maxLastSynced(specData) || 'midnight';
+  const commits = parseGitLog(projectRoot, baseline);
+  const fallbackBranch = currentBranchName(projectRoot);
+  const groupedCommits = groupCommitsByBranch(projectRoot, commits, fallbackBranch);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const seenNumbers = new Set();
+  const commentQueue = [];
+  const ticketUpdates = [];
+  let specChanged = false;
+
+  for (const ticketSpec of specData.tickets || []) {
+    const rawNumber = ticketSpec['Ticket Number'];
+    const number = normalizeTicketNumber(rawNumber);
+    if (number === null) {
+      console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
+      continue;
+    }
+    if (seenNumbers.has(number)) {
+      console.log(`Skipping duplicate Ticket Number in spec: ${number}`);
+      continue;
+    }
+    seenNumbers.add(number);
+
+    const branch = ticketSpec.Branch;
+    const branchCommits = branch ? groupedCommits.get(branch) || [] : [];
+    const latestCommit = ticketSpec['Latest Commit'];
+    const commitsToComment = commitsAfterLatest(branchCommits, latestCommit);
+    const hasNewCommits = commitsToComment.length > 0;
+
+    const currentStatus = ticketSpec.Status || 'Backlog';
+    const nextStatus = nextStatusForSync(currentStatus, ticketSpec['Dev Notes'], hasNewCommits);
+    if (nextStatus && nextStatus !== ticketSpec.Status) {
+      ticketSpec.Status = nextStatus;
+      specChanged = true;
+    }
+
+    if (branch) {
+      const computedPriority = computePriority(branch, ticketSpec.Type || 'Feature');
+      if (computedPriority && ticketSpec.Priority !== computedPriority) {
+        ticketSpec.Priority = computedPriority;
+        specChanged = true;
+      }
+    }
+
+    if (hasNewCommits) {
+      const latest = shortHash(branchCommits[branchCommits.length - 1].hash);
+      if (latest && latest !== ticketSpec['Latest Commit']) {
+        ticketSpec['Latest Commit'] = latest;
+        specChanged = true;
+      }
+      if (ticketSpec['Last Synced'] !== today) {
+        ticketSpec['Last Synced'] = today;
+        specChanged = true;
+      }
+    }
+
+    const existing = existingByNumber.get(number);
+    if (!existing) {
+      console.log(`Ticket ${number} not found in Notion. Skipping updates.`);
+      continue;
+    }
+
+    if (commitsToComment.length > 0) {
+      commentQueue.push({ pageId: existing.id, commits: commitsToComment, number });
+    }
+
+    const updates = buildTicketUpdatesFromSpec(ticketSpec, existing.properties);
+    if (Object.keys(updates).length > 0) {
+      ticketUpdates.push({ pageId: existing.id, updates, number });
+    }
+  }
+
+  if (specChanged) {
+    writeSpecFile(specPath, specData);
+  }
+
+  if (Object.keys(projectUpdates).length > 0) {
+    await updatePageProperties(projectPageId, projectUpdates);
+  }
+
+  for (const entry of ticketUpdates) {
+    await updatePageProperties(entry.pageId, entry.updates);
+    console.log(`Updated ticket ${entry.number}`);
+  }
+
+  for (const entry of commentQueue) {
+    for (const commit of entry.commits) {
+      await postCommitComment(entry.pageId, commit);
+      console.log(`Appended commit ${shortHash(commit.hash)} to ticket ${entry.number}`);
+    }
+  }
+
+  if (ticketUpdates.length === 0 && commentQueue.length === 0) {
+    console.log('No changes');
+  }
 }
 
 async function main() {
   const [, , command, ...rest] = process.argv;
-  if (!command) {
+  if (command !== 'sync') {
     showUsage();
     return;
   }
+  const projectRoot = process.cwd();
   const options = parseArgs(rest);
-  if (command === 'init') {
-    const specPath = resolveSpecPath(options.spec);
-    await initProject(specPath);
+  const specPath = resolveSpecPath(options.spec, projectRoot);
+
+  const autoCommitResult = autoCommitIfNeeded(projectRoot);
+  if (autoCommitResult.failed) {
     return;
   }
-  if (command === 'sync') {
-    await syncDaily();
-    return;
-  }
-  console.error("Invalid command. Use 'init' for new projects or 'sync' for daily updates.");
+
+  await syncProject(specPath, projectRoot);
 }
 
 main().catch((error) => {

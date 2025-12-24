@@ -3,91 +3,25 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
+const {
+  defaultSpecPath,
+  writeSpecFile,
+  applyInitDefaults,
+  normalizeTicketNumber,
+  generateInitTickets,
+} = require('./notion-rules');
+
 const PROJECTS_DB_ID = 'f5124c3d-1b2c-47da-87af-9d062d01fde7';
 const TICKETS_DB_ID = '6574df08-bf7c-4813-906f-5f3f3f819908';
 const NOTION_VERSION = '2022-06-28';
 const NOTION_API_URL = 'https://api.notion.com/v1/pages';
 const NOTION_TOKEN = 'ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47';
 
-function resolveSpecPath(specArg) {
-  if (!specArg) {
-    throw new Error('Missing --spec argument');
+function resolveSpecPath(specArg, projectRoot) {
+  if (specArg) {
+    return path.isAbsolute(specArg) ? specArg : path.resolve(projectRoot, specArg);
   }
-  return path.isAbsolute(specArg) ? specArg : path.resolve(process.cwd(), specArg);
-}
-
-function splitKeyValue(line) {
-  const colonIndex = line.indexOf(':');
-  if (colonIndex === -1) {
-    return null;
-  }
-  const key = line.slice(0, colonIndex).trim();
-  const value = line.slice(colonIndex + 1).trim();
-  return { key, value };
-}
-
-function parseSpec(specPath) {
-  const raw = fs.readFileSync(specPath, 'utf8');
-  const lines = raw.split(/\r?\n/);
-  let section = null;
-  const projectLines = [];
-  const ticketLines = [];
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      continue;
-    }
-    if (trimmed.startsWith('Project:')) {
-      section = 'project';
-      continue;
-    }
-    if (trimmed.startsWith('Tickets:')) {
-      section = 'tickets';
-      continue;
-    }
-    if (section === 'project') {
-      projectLines.push(trimmed.replace(/^-+\s*/, ''));
-    } else if (section === 'tickets') {
-      ticketLines.push(trimmed.replace(/^-+\s*/, ''));
-    }
-  }
-
-  const project = {};
-  for (const line of projectLines) {
-    const parsed = splitKeyValue(line);
-    if (parsed) {
-      project[parsed.key] = parsed.value;
-    }
-  }
-
-  const tickets = [];
-  let currentTicket = null;
-  for (const line of ticketLines) {
-    if (line.startsWith('Title:')) {
-      if (currentTicket) {
-        tickets.push(currentTicket);
-      }
-      currentTicket = {};
-      const parsed = splitKeyValue(line);
-      if (parsed) {
-        currentTicket[parsed.key] = parsed.value;
-      }
-      continue;
-    }
-    if (!currentTicket) {
-      continue;
-    }
-    const parsed = splitKeyValue(line);
-    if (parsed) {
-      currentTicket[parsed.key] = parsed.value;
-    }
-  }
-  if (currentTicket) {
-    tickets.push(currentTicket);
-  }
-
-  return { project, tickets };
+  return defaultSpecPath(projectRoot);
 }
 
 async function findProjectByKey(projectKey) {
@@ -155,6 +89,17 @@ function buildSelect(value) {
   return {
     select: {
       name: value,
+    },
+  };
+}
+
+function buildDate(value) {
+  if (!value) {
+    return null;
+  }
+  return {
+    date: {
+      start: value,
     },
   };
 }
@@ -250,7 +195,7 @@ async function createProject(specData) {
   };
 
   const created = await notionPost(payload);
-  console.log(`Project created: ${created.id}`);
+  console.log(`Project created: ${specData.project['Project Name']}`);
   return created.id;
 }
 
@@ -265,8 +210,8 @@ async function createTickets(specData, projectPageId) {
   const seenNumbers = new Set();
   for (const ticket of specData.tickets) {
     const rawNumber = ticket['Ticket Number'];
-    const number = Number(rawNumber);
-    if (Number.isNaN(number)) {
+    const number = normalizeTicketNumber(rawNumber);
+    if (number === null) {
       console.log(`Skipping ticket with invalid Ticket Number: ${rawNumber}`);
       continue;
     }
@@ -283,6 +228,9 @@ async function createTickets(specData, projectPageId) {
     addProperty(props, 'Status', buildSelect, 'Status');
     addProperty(props, 'Type', buildSelect, 'Type');
     addProperty(props, 'Branch', buildRichText, 'Branch');
+    addProperty(props, 'Dev Notes', buildRichText, 'Dev Notes');
+    addProperty(props, 'Last Synced', buildDate, 'Last Synced');
+    addProperty(props, 'Latest Commit', buildRichText, 'Latest Commit');
     props.data.Project = {
       relation: [
         {
@@ -298,8 +246,9 @@ async function createTickets(specData, projectPageId) {
       properties: props.data,
     };
 
-    const created = await notionPost(payload);
-    console.log(`Ticket ${number} created: ${created.id}`);
+    const displayNumber = String(number).padStart(3, '0');
+    await notionPost(payload);
+    console.log(`Ticket ${displayNumber} created: ${ticket.Title}`);
   }
 }
 
@@ -319,7 +268,7 @@ function parseArgs(argv) {
 }
 
 function showUsage() {
-  console.error('Usage: node notion-init.js init --spec <path-to-spec>');
+  console.error('Usage: node notion-init.js init [--spec <path-to-spec>]');
 }
 
 async function main() {
@@ -328,17 +277,36 @@ async function main() {
     showUsage();
     return;
   }
+  const projectRoot = process.cwd();
   const options = parseArgs(rest);
-  if (!options.spec) {
-    showUsage();
-    return;
+  const specPath = resolveSpecPath(options.spec, projectRoot);
+  const readmePath = path.join(projectRoot, 'README.md');
+
+  const specData = { project: {}, tickets: [] };
+  const projectName = path.basename(projectRoot);
+  const initTickets = generateInitTickets(projectRoot, readmePath, projectName);
+  specData.tickets = initTickets.tickets;
+
+  if (!specData.tickets || specData.tickets.length === 0) {
+    throw new Error('No tickets generated from README or folder structure.');
   }
-  const specPath = resolveSpecPath(options.spec);
-  const specData = parseSpec(specPath);
-  const existingProjectId = await findProjectByKey('NOTION');
+
+  const changed = applyInitDefaults(specData, projectRoot);
+  writeSpecFile(specPath, specData);
+
+  console.log(`README: ${initTickets.usedReadme || readmePath}`);
+  console.log(
+    `Modules: ${initTickets.modules.map((module) => module.title).join(', ') || 'none'}`
+  );
+  for (const ticket of specData.tickets) {
+    console.log(`Ticket ${ticket['Ticket Number']}: ${ticket.Title}`);
+  }
+  console.log(`Spec: ${specPath}`);
+
+  const existingProjectId = await findProjectByKey(specData.project['Project Key']);
   if (existingProjectId) {
     console.error(
-      "Project 'Notion-API' is already initialized.\n" +
+      `Project '${specData.project['Project Name']}' is already initialized.\n` +
         'Initialization is a one-time operation.\n' +
         "Use 'node Notion-API/tools/notion-sync.js sync' for daily updates."
     );
