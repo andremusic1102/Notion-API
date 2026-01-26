@@ -39,7 +39,32 @@ export NOTION_TICKETS_DB_ID=...
 
 ---
 
-## 3) 在其他 repo 建立兩個指令
+## 3) 讓其他 repo 知道 Notion-API 的來源
+
+你有兩種方式指定 Notion-API 的位置：
+
+### 3.1 使用本機路徑（預設）
+腳本會用 `NOTION_API_ROOT`，沒有設定時預設 `/workspaces/Notion-API`。
+
+你可以在執行前先指定：
+
+```bash
+export NOTION_API_ROOT=/path/to/Notion-API
+```
+
+### 3.2 使用 Notion-API GitHub URL（推薦給新環境）
+如果想要每次自動取得 Notion-API，你可以在腳本內加入 clone 邏輯：
+
+```bash
+NOTION_API_ROOT="${NOTION_API_ROOT:-/tmp/notion-api}"
+if [ ! -d "$NOTION_API_ROOT/.git" ]; then
+  git clone https://github.com/<org>/Notion-API.git "$NOTION_API_ROOT"
+fi
+```
+
+---
+
+## 4) 在其他 repo 建立兩個指令
 
 以下會在「其他 repo」新增兩個可直接執行的腳本：
 
@@ -58,8 +83,11 @@ set -euo pipefail
 # 取 GitHub URL 作為來源
 REPO_URL="$(git remote get-url origin)"
 
-# Notion-API repo 路徑（可自訂）
-NOTION_API_ROOT="${NOTION_API_ROOT:-/workspaces/Notion-API}"
+# Notion-API repo 來源（可自訂）
+NOTION_API_ROOT="${NOTION_API_ROOT:-/tmp/notion-api}"
+if [ ! -d "$NOTION_API_ROOT/.git" ]; then
+  git clone https://github.com/<org>/Notion-API.git "$NOTION_API_ROOT"
+fi
 
 node "$NOTION_API_ROOT/tools/notion-sync.js" init --repo-url "$REPO_URL"
 EOF
@@ -79,8 +107,11 @@ set -euo pipefail
 # 取 GitHub URL 作為來源
 REPO_URL="$(git remote get-url origin)"
 
-# Notion-API repo 路徑（可自訂）
-NOTION_API_ROOT="${NOTION_API_ROOT:-/workspaces/Notion-API}"
+# Notion-API repo 來源（可自訂）
+NOTION_API_ROOT="${NOTION_API_ROOT:-/tmp/notion-api}"
+if [ ! -d "$NOTION_API_ROOT/.git" ]; then
+  git clone https://github.com/<org>/Notion-API.git "$NOTION_API_ROOT"
+fi
 
 # full-sync 會做：Git → spec → Notion
 node "$NOTION_API_ROOT/tools/notion-sync.js" full-sync --repo-url "$REPO_URL"
@@ -91,7 +122,7 @@ chmod +x notion-sync.sh
 
 ---
 
-## 4) 使用方式
+## 5) 使用方式
 
 ### 4.1 初始化（第一次使用）
 
@@ -107,7 +138,7 @@ chmod +x notion-sync.sh
 
 ---
 
-## 5) 常見問題
+## 6) 常見問題
 
 ### Q1: 找不到 `notion-init.md`？
 請確認 spec 檔案在 repo 根目錄，檔名必須是 `notion-init.md`。
@@ -121,7 +152,7 @@ export NOTION_API_ROOT=/path/to/Notion-API
 
 ---
 
-## 6) 對應的指令行行為（參考）
+## 7) 對應的指令行行為（參考）
 
 如果你要直接跑，不用腳本也可以：
 
