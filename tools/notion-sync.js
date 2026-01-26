@@ -131,6 +131,57 @@ function extractShortTitle(fullTitle) {
   return words.slice(0, 3).join(' ');
 }
 
+function getRepoName() {
+  try {
+    const url = runGitCommand(['remote', 'get-url', 'origin']).trim();
+    if (url) {
+      const cleaned = url.replace(/\/+$/, '');
+      const name = cleaned.split('/').pop() || cleaned;
+      return name.replace(/\.git$/i, '');
+    }
+  } catch (error) {
+    // ignore
+  }
+  const repoRoot = resolveRepoRoot();
+  if (!repoRoot) {
+    return 'repo';
+  }
+  return path.basename(repoRoot);
+}
+
+function parseReadmeTodos(repoRoot) {
+  const readmePath = path.join(repoRoot, 'README.md');
+  if (!fs.existsSync(readmePath)) {
+    return [];
+  }
+  const raw = fs.readFileSync(readmePath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  const todos = [];
+  let inTodos = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!inTodos) {
+      if (/^##\s+TODOs\b/i.test(trimmed)) {
+        inTodos = true;
+      }
+      continue;
+    }
+    if (/^#+\s+/.test(trimmed)) {
+      break;
+    }
+    if (!trimmed) {
+      continue;
+    }
+    const listMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    if (listMatch && listMatch[1]) {
+      todos.push(listMatch[1].trim());
+      continue;
+    }
+    todos.push(trimmed);
+  }
+  return todos;
+}
+
 function parseSpec(specPath) {
   const raw = fs.readFileSync(specPath, 'utf8');
   const lines = raw.split(/\r?\n/);
@@ -473,6 +524,29 @@ async function queryDatabase(databaseId, payload) {
   return notionRequest(`https://api.notion.com/v1/databases/${databaseId}/query`, payload, 'POST');
 }
 
+async function findTicketByNumber(number, cache) {
+  if (number === null || number === undefined) {
+    return null;
+  }
+  const key = String(number);
+  if (cache[key]) {
+    return cache[key];
+  }
+  const payload = {
+    filter: {
+      property: 'Ticket Number',
+      number: {
+        equals: Number(number),
+      },
+    },
+    page_size: 1,
+  };
+  const result = await queryDatabase(TICKETS_DB_ID, payload);
+  const page = result.results && result.results.length > 0 ? result.results[0] : null;
+  cache[key] = page || null;
+  return page || null;
+}
+
 async function findProjectPageId(specData) {
   const key = specData.project['Project Key'];
   const name = specData.project['Project Name'];
@@ -637,65 +711,33 @@ async function updateSpecFromGit(specPath) {
   if (!fs.existsSync(resolvedSpecPath)) {
     throw new Error(`Spec file not found: ${resolvedSpecPath}`);
   }
-  const specData = parseSpec(resolvedSpecPath);
-  const existingBranches = new Set(
-    (specData.tickets || []).map((ticket) => ticket.Branch).filter(Boolean)
-  );
-  const existingNumbers = (specData.tickets || [])
-    .map((ticket) => Number(ticket['Ticket Number']))
-    .filter((value) => !Number.isNaN(value));
-  const nextNumberStart = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 2001;
-
-  const commits = parseGitLog('midnight');
-  const fallbackBranch = currentBranchName();
-  const groupedCommits = groupCommitsByBranch(commits, fallbackBranch);
-  const candidateBranches = new Set();
-  const statusBranch = getStatusBranch();
-  if (statusBranch) {
-    candidateBranches.add(statusBranch);
-  }
-  for (const branch of groupedCommits.keys()) {
-    if (branch) {
-      candidateBranches.add(branch);
-    }
+  const todos = parseReadmeTodos(repoRoot);
+  if (todos.length === 0) {
+    console.log('No TODOs found in README.md');
+    return { appendedCount: 0, specPath: resolvedSpecPath, groupedCommits: new Map() };
   }
 
-  const newTickets = [];
-  let ticketNumber = nextNumberStart;
-  const projectName = specData.project['Project Name'];
-  const projectDescription = specData.project.Description;
+  const raw = fs.readFileSync(resolvedSpecPath, 'utf8');
+  const lines = raw.split(/\r?\n/);
+  const ticketStartIndex = lines.findIndex((line) => line.trim().startsWith('Tickets:'));
+  const headerLines = ticketStartIndex >= 0 ? lines.slice(0, ticketStartIndex + 1) : lines;
 
-  const sortedBranches = Array.from(candidateBranches).sort();
-  for (const branch of sortedBranches) {
-    if (!branch || existingBranches.has(branch)) {
-      continue;
-    }
-    if (!branch.startsWith('feature/') && !branch.startsWith('techdebt/')) {
-      continue;
-    }
-    const branchCommits = groupedCommits.get(branch) || [];
-    const title = titleFromBranch(branch);
-    const devNotes = buildDevNotes(projectName, projectDescription, branch, branchCommits);
-    const type = branch.startsWith('techdebt/') ? 'Tech Debt' : 'Feature';
-    const priority = branch.startsWith('techdebt/') ? 'Low' : 'Medium';
-    newTickets.push({
-      Title: title,
-      'Ticket Number': ticketNumber,
-      Priority: priority,
-      Status: 'Backlog',
-      Type: type,
-      Branch: branch,
-      'Dev Notes': devNotes,
-    });
-    existingBranches.add(branch);
-    ticketNumber += 1;
-  }
+  const ticketLines = [];
+  todos.forEach((title, index) => {
+    const number = index + 1;
+    ticketLines.push(
+      `- Title: ${title}`,
+      `  Ticket Number: ${number}`,
+      `  Priority: Medium`,
+      `  Status: Backlog`,
+      `  Type: Tech Debt`
+    );
+  });
 
-  const appendedCount = await appendTicketsToSpec(resolvedSpecPath, newTickets);
-  for (const ticket of newTickets) {
-    console.log(`Appended spec ticket ${ticket['Ticket Number']} (${ticket.Branch})`);
-  }
-  return { appendedCount, specPath: resolvedSpecPath, groupedCommits };
+  const newContent = `${headerLines.join('\n')}\n${ticketLines.join('\n')}\n`;
+  fs.writeFileSync(resolvedSpecPath, newContent, 'utf8');
+  console.log(`Updated spec with ${todos.length} tickets from README TODOs`);
+  return { appendedCount: todos.length, specPath: resolvedSpecPath, groupedCommits: new Map() };
 }
 
 function normalizeSince(value) {
@@ -908,6 +950,18 @@ function shouldAdvanceStatus(statusName, hasCommits) {
   return statusName === 'Backlog' && hasCommits;
 }
 
+function extractTicketNumberFromMessage(message, repoName) {
+  if (!message || !repoName) {
+    return null;
+  }
+  const escaped = repoName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = message.match(new RegExp(`${escaped}-(\\d+)`, 'i'));
+  if (!match) {
+    return null;
+  }
+  return Number(match[1]);
+}
+
 async function syncGitLog(sinceValue, options = {}) {
   let normalizedSince = normalizeSince(sinceValue);
   if (sinceValue === 'last-sync') {
@@ -921,21 +975,24 @@ async function syncGitLog(sinceValue, options = {}) {
     return { changes: 0 };
   }
   const ticketCache = {};
-  const fallbackBranch = currentBranchName();
-  const grouped = groupCommitsByBranch(commits, fallbackBranch);
+  const repoName = getRepoName();
+  const grouped = new Map();
+  for (const commit of commits) {
+    const number = extractTicketNumberFromMessage(commit.message, repoName);
+    if (!number) {
+      continue;
+    }
+    const list = grouped.get(number) || [];
+    list.push(commit);
+    grouped.set(number, list);
+  }
   const nowIso = new Date().toISOString();
   let changes = 0;
 
-  for (const [branch, branchCommits] of grouped.entries()) {
-    if (!branch) {
-      for (const commit of branchCommits) {
-        console.log(`Skipping commit ${commit.hash} - branch could not be determined`);
-      }
-      continue;
-    }
-    const ticket = await findTicketForBranch(branch, ticketCache);
+  for (const [number, numberCommits] of grouped.entries()) {
+    const ticket = await findTicketByNumber(number, ticketCache);
     if (!ticket) {
-      console.log(`No ticket found for branch ${branch}`);
+      console.log(`No ticket found for number ${number}`);
       continue;
     }
     const properties = ticket.properties || {};
@@ -948,12 +1005,13 @@ async function syncGitLog(sinceValue, options = {}) {
     const shouldSkipUntilFound =
       !forced &&
       latestCommit &&
-      branchCommits.some((commit) => shortHash(commit.hash) === latestCommit);
+      numberCommits.some((commit) => shortHash(commit.hash) === latestCommit);
     let startAppending = !shouldSkipUntilFound;
     let appendedAny = false;
     let newestCommit = null;
 
-    for (const commit of branchCommits) {
+    const ordered = [...numberCommits].reverse();
+    for (const commit of ordered) {
       const commitShort = shortHash(commit.hash);
       if (!startAppending) {
         if (commitShort === latestCommit) {
@@ -963,7 +1021,7 @@ async function syncGitLog(sinceValue, options = {}) {
       }
       await postCommitComment(ticket.id, commit);
       const ticketLabel = ticketNumber ? `${ticketNumber}` : ticket.id;
-      console.log(`Appended commit ${commitShort} (${branch}) to ticket ${ticketLabel}`);
+      console.log(`Appended commit ${commitShort} to ticket ${ticketLabel}`);
       appendedAny = true;
       newestCommit = commitShort;
       changes += 1;
@@ -1011,8 +1069,17 @@ async function diffSync(specPath, options = {}) {
   }
 
   const commits = parseGitLog('midnight');
-  const fallbackBranch = currentBranchName();
-  const groupedCommits = groupCommitsByBranch(commits, fallbackBranch);
+  const repoName = getRepoName();
+  const groupedCommits = new Map();
+  for (const commit of commits) {
+    const number = extractTicketNumberFromMessage(commit.message, repoName);
+    if (!number) {
+      continue;
+    }
+    const list = groupedCommits.get(number) || [];
+    list.push(commit);
+    groupedCommits.set(number, list);
+  }
   const today = new Date().toISOString().slice(0, 10);
   let changes = 0;
   const forceCommentTicketIds = new Set();
@@ -1031,11 +1098,10 @@ async function diffSync(specPath, options = {}) {
     }
     seenNumbers.add(number);
 
-    const branch = ticketSpec.Branch;
-    const hasCommits = branch && groupedCommits.has(branch) && groupedCommits.get(branch).length > 0;
+    const hasCommits = groupedCommits.has(number) && groupedCommits.get(number).length > 0;
     const existing = existingByNumber.get(number);
-    const branchCommits = branch ? groupedCommits.get(branch) || [] : [];
-    const latestCommit = branchCommits.length > 0 ? shortHash(branchCommits[branchCommits.length - 1].hash) : null;
+    const numberCommits = groupedCommits.get(number) || [];
+    const latestCommit = numberCommits.length > 0 ? shortHash(numberCommits[0].hash) : null;
 
     if (!existing) {
       const payload = buildTicketPayloadFromSpec(ticketSpec, projectPageId);
@@ -1061,7 +1127,6 @@ async function diffSync(specPath, options = {}) {
     const lastSynced = getDateValue(existing.properties, 'Last Synced');
     const currentTitle = getTitleValue(existing.properties, 'Title');
     const currentDevNotes = getRichTextValue(existing.properties, 'Dev Notes');
-    const currentBranch = getRichTextValue(existing.properties, 'Branch');
     const currentPriority = getSelectName(existing.properties, 'Priority');
     const currentType = getSelectName(existing.properties, 'Type');
 
@@ -1072,10 +1137,6 @@ async function diffSync(specPath, options = {}) {
     if (ticketSpec['Dev Notes'] && ticketSpec['Dev Notes'] !== currentDevNotes) {
       updates['Dev Notes'] = buildRichText(ticketSpec['Dev Notes']);
       updatedFields.push('Dev Notes');
-    }
-    if (ticketSpec.Branch && ticketSpec.Branch !== currentBranch) {
-      updates.Branch = buildRichText(ticketSpec.Branch);
-      updatedFields.push('Branch');
     }
     if (ticketSpec.Priority && ticketSpec.Priority !== currentPriority) {
       updates.Priority = buildSelect(ticketSpec.Priority);
