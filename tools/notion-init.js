@@ -3,11 +3,23 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
-const PROJECTS_DB_ID = 'f5124c3d-1b2c-47da-87af-9d062d01fde7';
-const TICKETS_DB_ID = '6574df08-bf7c-4813-906f-5f3f3f819908';
+const PROJECTS_DB_ID = process.env.NOTION_PROJECTS_DB_ID;
+const TICKETS_DB_ID = process.env.NOTION_TICKETS_DB_ID;
 const NOTION_VERSION = '2022-06-28';
 const NOTION_API_URL = 'https://api.notion.com/v1/pages';
-const NOTION_TOKEN = 'ntn_b86750914948HHTVYnnygGdDMwvD6YlJxuiVw5TqmyWe47';
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+
+function ensureNotionConfig() {
+  if (!NOTION_TOKEN) {
+    throw new Error('NOTION_TOKEN must be set');
+  }
+  if (!PROJECTS_DB_ID) {
+    throw new Error('NOTION_PROJECTS_DB_ID must be set');
+  }
+  if (!TICKETS_DB_ID) {
+    throw new Error('NOTION_TICKETS_DB_ID must be set');
+  }
+}
 
 function resolveSpecPath(specArg) {
   if (!specArg) {
@@ -288,6 +300,7 @@ async function main() {
     showUsage();
     return;
   }
+  ensureNotionConfig();
   const specPath = resolveSpecPath(options.spec);
   const specData = parseSpec(specPath);
   const projectPageId = await createProject(specData);
