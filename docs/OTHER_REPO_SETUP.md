@@ -66,90 +66,28 @@ export NOTION_TICKETS_DB_ID=...
 
 ---
 
-## 2) Spec 檔案規則
+## 2) 使用方式（全部透過 Notion-API）
 
-每一個專案 repo 必須在 repo 根目錄放置 `notion-init.md`。
+所有操作都在 **Notion-API repo** 執行，不在其他 repo 內跑指令或寫腳本。
 
-你可以參考 `Notion-API` repo 裡的範例：
-`/workspaces/Notion-API/specs/workdomain-init.md`
-
----
-
-## 3) 讓其他 repo 知道 Notion-API 的來源
-
-你有兩種方式指定 Notion-API 的位置：
-
-### 3.1 使用本機路徑（預設）
-腳本會用 `NOTION_API_ROOT`，沒有設定時預設 `/workspaces/Notion-API`。
-
-你可以在執行前先指定：
+初始化（第一次使用）：
 
 ```bash
-export NOTION_API_ROOT=/path/to/Notion-API
+node /workspaces/Notion-API/tools/notion-sync.js init --repo-url <GITHUB_URL>
 ```
 
-### 3.2 使用 Notion-API GitHub URL（推薦給新環境）
-如果想要每次自動取得 Notion-API，你可以在腳本內加入 clone 邏輯：
+每日同步：
 
 ```bash
-NOTION_API_ROOT="${NOTION_API_ROOT:-/tmp/notion-api}"
-if [ ! -d "$NOTION_API_ROOT/.git" ]; then
-  git clone https://github.com/<org>/Notion-API.git "$NOTION_API_ROOT"
-fi
+node /workspaces/Notion-API/tools/notion-sync.js full-sync --repo-url <GITHUB_URL>
 ```
 
 ---
 
-## 4) 直接執行 Notion-API 指令（不建立腳本）
+## 3) 其他 repo 必要條件
 
-你可以在其他 repo 直接執行 Notion-API 指令：
-
-```bash
-REPO_URL="$(git remote get-url origin)"
-node /tmp/notion-api/tools/notion-sync.js init --repo-url "$REPO_URL"
-node /tmp/notion-api/tools/notion-sync.js full-sync --repo-url "$REPO_URL"
-```
-
----
-
-## 5) 使用方式
-
-### 5.1 初始化（第一次使用）
-
-```bash
-./notion-init.sh
-```
-
-### 5.2 每日同步
-
-```bash
-./notion-sync.sh
-```
-
----
-
-## 6) 常見問題
-
-### Q1: 找不到 `notion-init.md`？
-請確認 spec 檔案在 repo 根目錄，檔名必須是 `notion-init.md`。
-
-### Q2: 不是使用 `/workspaces/Notion-API`？
-你可以在執行前先設定：
-
-```bash
-export NOTION_API_ROOT=/path/to/Notion-API
-```
-
----
-
-## 7) 對應的指令行行為（參考）
-
-如果你要直接跑，不用腳本也可以：
-
-```bash
-node /tmp/notion-api/tools/notion-sync.js init --repo-url <GITHUB_URL>
-node /tmp/notion-api/tools/notion-sync.js full-sync --repo-url <GITHUB_URL>
-```
+1) README 需包含標準 `## TODOs` 區塊（見上方規則）
+2) repo 需有 `notion-init.md`（若沒有，full-sync 會建立最小範例）
 
 ---
 
@@ -160,16 +98,15 @@ node /tmp/notion-api/tools/notion-sync.js full-sync --repo-url <GITHUB_URL>
 
 前提：
 - NOTION_TOKEN / NOTION_PROJECTS_DB_ID / NOTION_TICKETS_DB_ID 已在環境變數中
-- Notion-API GitHub URL：https://github.com/andremusic1102/Notion-API.git
+- Notion-API GitHub URL（公開）：https://github.com/andremusic1102/Notion-API.git
 
 需求：
-1) 若 `/tmp/notion-api` 不存在，clone Notion-API 到 `/tmp/notion-api`
-2) 若 repo 根目錄沒有 `notion-init.md`，建立最小範例
-3) 直接執行 Notion-API 指令（不要建立腳本）：
-   - `node /tmp/notion-api/tools/notion-sync.js init --repo-url <this repo url>`
-   - `node /tmp/notion-api/tools/notion-sync.js full-sync --repo-url <this repo url>`
-4) Notion-API 指令必須使用 `git remote get-url origin` 取得 repo URL
-5) 不要安裝任何套件，不要修改 Notion-API 原始碼
+1) 在 /workspaces/Notion-API 執行，不在此 repo 跑指令
+2) 直接執行 Notion-API 指令（不要建立腳本）：
+   - `node /workspaces/Notion-API/tools/notion-sync.js init --repo-url <this repo url>`
+   - `node /workspaces/Notion-API/tools/notion-sync.js full-sync --repo-url <this repo url>`
+3) 若 repo 根目錄沒有 `notion-init.md`，建立最小範例
+4) 不要安裝任何套件，不要修改 Notion-API 原始碼
 
 完成後請回報執行的指令與結果。
 ```
