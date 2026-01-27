@@ -36,7 +36,7 @@ Set these before running any Notion commands:
 
 ## Rules (for other repos)
 
-1) README must include:
+1) README must include (strict format):
 
 ```md
 ## TODOs
@@ -46,7 +46,8 @@ Set these before running any Notion commands:
 
 Rules:
 - Section title must be exactly `## TODOs`
-- Each `-`/`*` line becomes a ticket
+- Each line must start with `- ` (hyphen + space)
+- Only items under `## TODOs` are turned into tickets
 
 2) `notion-init.md`
 - If missing, Notion-API will generate it from README TODOs
@@ -59,18 +60,22 @@ Rules:
 ## CodeX Prompt (initial setup)
 
 ```text
-請在此 repo 內完成 Notion-API 串接與初始化設定。
+請在「目標 repo」內完成 Notion-API 串接與初始化設定。
 
 前提：
 - NOTION_TOKEN / NOTION_PROJECTS_DB_ID / NOTION_TICKETS_DB_ID 已在環境變數中
 - Notion-API GitHub URL（公開）：https://github.com/andremusic1102/Notion-API.git
 
 需求：
-1) 在 /workspaces/Notion-API 執行，不在此 repo 跑指令
-2) 先取得 repo URL（使用 `git remote get-url origin`），然後直接執行初始化與同步指令
-3) 若 repo 根目錄沒有 `notion-init.md`，請依 README `## TODOs` 產生完整 `notion-init.md`
-4) 依 README TODOs 建立/更新 tickets 後再同步 Notion
-5) 不要安裝任何套件，不要修改 Notion-API 原始碼
+1) 在「目標 repo」執行 `git remote get-url origin`，把結果存成 REPO_URL
+2) 確認 REPO_URL 不是 Notion-API 的 URL（必須是目標 repo 的 URL）
+3) 在「目標 repo」clone Notion-API 到 `/tmp/notion-api`（若不存在）
+4) 進入 `/tmp/notion-api` 後執行：
+   - `node tools/notion-sync.js init --repo-url "$REPO_URL"`
+   - `node tools/notion-sync.js full-sync --repo-url "$REPO_URL"`
+5) 若目標 repo 根目錄沒有 `notion-init.md`，請依 README `## TODOs` 產生完整 `notion-init.md`
+6) 僅在 README 的 `## TODOs` 下、且每行為 `- ` 開頭時才可建立 ticket
+7) 不要安裝任何套件，不要修改 Notion-API 原始碼
 
 完成後請回報執行的指令與結果。
 ```
@@ -78,11 +83,13 @@ Rules:
 ## CodeX Prompt (daily sync)
 
 ```text
-請在 /workspaces/Notion-API 執行同步，不在此 repo 跑指令。
+請在「目標 repo」取得 URL，然後在 Notion-API 執行同步。
 
 步驟：
-1) 取得 repo URL（使用 `git remote get-url origin`）
-2) 執行同步（使用 Notion-API 的 full-sync 指令）
+1) 在目標 repo 執行 `git remote get-url origin`，把結果存成 REPO_URL
+2) 確認 REPO_URL 不是 Notion-API 的 URL（必須是目標 repo 的 URL）
+3) 在 `/tmp/notion-api` 執行：
+   - `node tools/notion-sync.js full-sync --repo-url "$REPO_URL"`
 
 不要安裝任何套件，不要修改 Notion-API 原始碼。
 ```
