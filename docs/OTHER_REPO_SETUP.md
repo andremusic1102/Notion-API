@@ -102,9 +102,10 @@ node /workspaces/Notion-API/tools/notion-sync.js full-sync --repo-url <GITHUB_UR
 
 需求：
 1) 在 /workspaces/Notion-API 執行，不在此 repo 跑指令
-2) 直接執行 Notion-API 指令（不要建立腳本）：
-   - `node /workspaces/Notion-API/tools/notion-sync.js init --repo-url <this repo url>`
-   - `node /workspaces/Notion-API/tools/notion-sync.js full-sync --repo-url <this repo url>`
+2) 先取得 repo URL（使用 `git remote get-url origin`），然後直接執行初始化與同步指令：
+   - `REPO_URL="$(git remote get-url origin)"`
+   - `node /workspaces/Notion-API/tools/notion-sync.js init --repo-url "$REPO_URL"`
+   - `node /workspaces/Notion-API/tools/notion-sync.js full-sync --repo-url "$REPO_URL"`
 3) 若 repo 根目錄沒有 `notion-init.md`，建立最小範例
 4) 不要安裝任何套件，不要修改 Notion-API 原始碼
 
