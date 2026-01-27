@@ -149,6 +149,27 @@ function getRepoName() {
   return path.basename(repoRoot);
 }
 
+function getRepoUrl() {
+  try {
+    const url = runGitCommand(['remote', 'get-url', 'origin']).trim();
+    return url || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getDefaultBranchName() {
+  try {
+    const head = runGitCommand(['symbolic-ref', '-q', '--short', 'HEAD']).trim();
+    if (head) {
+      return head;
+    }
+  } catch (error) {
+    // ignore
+  }
+  return 'main';
+}
+
 function parseReadmeTodos(repoRoot) {
   const readmePath = path.join(repoRoot, 'README.md');
   if (!fs.existsSync(readmePath)) {
@@ -180,6 +201,43 @@ function parseReadmeTodos(repoRoot) {
     todos.push(trimmed);
   }
   return todos;
+}
+
+function writeSpecFromReadme(repoRoot, specPath, todos) {
+  const repoName = getRepoName();
+  const repoUrl = getRepoUrl() || repoName;
+  const defaultBranch = getDefaultBranchName();
+  const projectKey = `${repoName}-001`;
+  const description = 'Generated from README TODOs';
+
+  const headerLines = [
+    'Project:',
+    `- Project Key: ${projectKey}`,
+    `- Project Name: ${repoName}`,
+    `- Repository: ${repoUrl}`,
+    `- Default Branch: ${defaultBranch}`,
+    '- Status: Active',
+    `- Description: ${description}`,
+    '',
+    'Tickets:',
+  ];
+
+  const ticketLines = [];
+  if (Array.isArray(todos)) {
+    todos.forEach((title, index) => {
+      const number = index + 1;
+      ticketLines.push(
+        `- Title: ${title}`,
+        `  Ticket Number: ${number}`,
+        `  Priority: Medium`,
+        `  Status: Backlog`,
+        `  Type: Tech Debt`
+      );
+    });
+  }
+
+  const content = `${headerLines.join('\n')}\n${ticketLines.join('\n')}\n`;
+  fs.writeFileSync(specPath, content, 'utf8');
 }
 
 function parseSpec(specPath) {
@@ -708,10 +766,16 @@ async function updateSpecFromGit(specPath) {
     throw new Error('Unable to resolve git repo root');
   }
   const resolvedSpecPath = specPath || defaultSpecPath(repoRoot);
-  if (!fs.existsSync(resolvedSpecPath)) {
-    throw new Error(`Spec file not found: ${resolvedSpecPath}`);
-  }
   const todos = parseReadmeTodos(repoRoot);
+  if (!fs.existsSync(resolvedSpecPath)) {
+    writeSpecFromReadme(repoRoot, resolvedSpecPath, todos);
+    if (todos.length === 0) {
+      console.log('No TODOs found in README.md');
+      return { appendedCount: 0, specPath: resolvedSpecPath, groupedCommits: new Map() };
+    }
+    console.log(`Created spec with ${todos.length} tickets from README TODOs`);
+    return { appendedCount: todos.length, specPath: resolvedSpecPath, groupedCommits: new Map() };
+  }
   if (todos.length === 0) {
     console.log('No TODOs found in README.md');
     return { appendedCount: 0, specPath: resolvedSpecPath, groupedCommits: new Map() };
